@@ -1,0 +1,16 @@
+[package]
+name = "lossless-checker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 纯 Rust 音频解码，支持 FLAC / ALAC / WAV / MP3 等，无需系统依赖
+symphonia = { version = "0.5", features = ["all"] }
+# FFT 计算
+rustfft = "6.2"
+# 命令行参数解析
+clap = { version = "4.5", features = ["derive"] }
+
+# release 下开优化，扫大库才快
+[profile.release]
+opt-level = 3

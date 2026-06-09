@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target
+
+# IDE
+/.idea
+
+# Claude Code
+/.claude
+
+# macOS
+.DS_Store
+
+# Local scan reports — reference personal library paths, keep out of the public repo
+/SUSPECTS.md
+/scan-results.tsv
