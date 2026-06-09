@@ -38,8 +38,17 @@ struct Cli {
     /// Path to a single audio file, or a directory to scan recursively
     path: PathBuf,
 
-    /// Noise-floor multiplier: how many times above the noise floor a bin must be to count as
-    /// real signal. The default 10.0 is calibrated against real files; override only for debugging.
+    /// Peak-relative cutoff threshold, in dB below the spectral peak. This is the default detection
+    /// method: the cutoff is the highest frequency whose energy stays within this many dB of the
+    /// track's own peak. Calibrated to 65.0; override only for debugging.
+    #[arg(long, default_value_t = 65.0)]
+    peak_db: f64,
+
+    /// Use the legacy noise-floor detection method (with --threshold) instead of peak-relative.
+    #[arg(long)]
+    noise_floor: bool,
+
+    /// Noise-floor multiplier for the legacy method (only used with --noise-floor).
     #[arg(long, default_value_t = 10.0)]
     threshold: f64,
 
@@ -68,10 +77,13 @@ struct DecodedAudio {
 
 // Verdict cutoffs in absolute Hz. Lossy encoders low-pass at a fixed Hz (independent of the
 // container sample rate), so an absolute threshold is correct; a fraction-of-Nyquist would wrongly
-// flag 48kHz files whose genuine content also stops at ~21-22kHz. Calibrated on a real library:
-//   genuine lossless -> cutoff 19-23kHz   256k -> ~18-19kHz   128k -> ~16kHz   lower -> 12-15kHz
+// flag 48kHz files whose genuine content also stops at ~21-22kHz. Calibrated for the default
+// peak-relative detector against a real library plus known-answer round-trip fakes (a real FLAC
+// re-encoded through 128k/320k MP3 and back):
+//   genuine lossless -> cutoff ~19-22kHz   128k transcode -> ~16.0-16.7kHz (caught as 🚩)
+//   320k transcode   -> ~20kHz, overlaps genuine roll-off and is largely undetectable by cutoff.
 const CUTOFF_CLEAN: f32 = 19000.0;
-const CUTOFF_NARROW: f32 = 16500.0;
+const CUTOFF_NARROW: f32 = 16800.0;
 
 /// Three-tier verdict, shared by the console output, the text report and the JSON.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
@@ -136,8 +148,11 @@ fn main() {
             .build_global();
     }
 
+    // None = legacy noise-floor method (with --threshold); Some(db) = peak-relative (default).
+    let peak_db = if cli.noise_floor { None } else { Some(cli.peak_db) };
+
     if cli.path.is_file() {
-        run_single(&cli.path, cli.threshold);
+        run_single(&cli.path, cli.threshold, peak_db);
     } else if cli.path.is_dir() {
         run_batch(&cli);
     } else {
@@ -147,7 +162,7 @@ fn main() {
 }
 
 /// Single-file mode: print the detailed per-file verdict (backward-compatible behaviour).
-fn run_single(path: &Path, threshold: f64) {
+fn run_single(path: &Path, threshold: f64, peak_db: Option<f64>) {
     let decoded = match decode_audio(path) {
         Ok(d) => d,
         Err(e) => {
@@ -161,7 +176,7 @@ fn run_single(path: &Path, threshold: f64) {
         std::process::exit(1);
     }
 
-    let cutoff = analyze_cutoff(&decoded, threshold);
+    let cutoff = analyze_cutoff(&decoded, threshold, peak_db);
     let nyquist = decoded.sample_rate as f32 / 2.0;
     let ratio = cutoff / nyquist;
 
@@ -204,10 +219,11 @@ fn run_batch(cli: &Cli) {
 
     let done = AtomicUsize::new(0);
     let threshold = cli.threshold;
+    let peak_db = if cli.noise_floor { None } else { Some(cli.peak_db) };
     let mut outcomes: Vec<Outcome> = files
         .par_iter()
         .map(|p| {
-            let o = analyze_file(p, threshold);
+            let o = analyze_file(p, threshold, peak_db);
             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
             if n % 25 == 0 || n == total {
                 eprint!("\r扫描中… {n}/{total}");
@@ -284,13 +300,13 @@ fn collect_into(dir: &Path, exts: &[String], out: &mut Vec<PathBuf>) {
 }
 
 /// Decode + analyze one file, capturing any failure as an error string (never panics).
-fn analyze_file(path: &Path, threshold: f64) -> Outcome {
+fn analyze_file(path: &Path, threshold: f64, peak_db: Option<f64>) -> Outcome {
     let result = (|| {
         let decoded = decode_audio(path)?;
         if decoded.samples.is_empty() {
             return Err("没有解码出任何采样".to_string());
         }
-        let cutoff = analyze_cutoff(&decoded, threshold);
+        let cutoff = analyze_cutoff(&decoded, threshold, peak_db);
         let nyquist = decoded.sample_rate as f32 / 2.0;
         Ok(Analysis {
             sample_rate: decoded.sample_rate,
@@ -396,7 +412,7 @@ fn decode_audio(path: &Path) -> Result<DecodedAudio, String> {
 
 /// Run a windowed FFT over the audio, accumulate per-band energy, and find the cutoff frequency
 /// where the high-frequency energy "cliff" sits. Returns the estimated cutoff frequency (Hz).
-fn analyze_cutoff(audio: &DecodedAudio, threshold_mult: f64) -> f32 {
+fn analyze_cutoff(audio: &DecodedAudio, threshold_mult: f64, peak_db: Option<f64>) -> f32 {
     const FFT_SIZE: usize = 8192; // freq resolution = sample_rate / FFT_SIZE, ~5-6 Hz/bin @44.1k
 
     if audio.samples.len() < FFT_SIZE {
@@ -448,6 +464,39 @@ fn analyze_cutoff(audio: &DecodedAudio, threshold_mult: f64) -> f32 {
     let nyquist = audio.sample_rate as f32 / 2.0;
     let bin_hz = nyquist / (FFT_SIZE as f32 / 2.0);
 
+    // Default method: peak-relative detection. Reference the cutoff against the spectrum's own peak
+    // (the loudest bin, usually low-mid) rather than the top-band noise floor. The cutoff is the
+    // highest frequency whose smoothed energy stays within `db` dB of that peak. This is robust to
+    // brickwall cuts: above a hard low-pass the energy collapses far below the strong mid-band
+    // reference, so faint residue no longer masquerades as real signal. This fixed the noise-floor
+    // method's failure mode where clean transcode cuts on weak-HF content (orchestral/vocal) read
+    // as full-band. Calibrated to db=65 against known-answer 128k/320k round-trip fakes.
+    if let Some(db) = peak_db {
+        // Smooth the power spectrum with a small moving average so isolated bins don't trip it.
+        let half = FFT_SIZE / 2;
+        let win = 9usize;
+        let mut smooth = vec![0.0f64; half];
+        for i in 0..half {
+            let lo = i.saturating_sub(win / 2);
+            let hi = (i + win / 2 + 1).min(half);
+            let slice = &energy[lo..hi];
+            smooth[i] = slice.iter().sum::<f64>() / slice.len() as f64;
+        }
+        let peak = smooth.iter().cloned().fold(0.0f64, f64::max);
+        if peak <= 0.0 {
+            return nyquist;
+        }
+        let thresh = peak * 10f64.powf(-db / 10.0); // dB below peak, in power
+        let mut cutoff_bin = 0usize;
+        for i in (0..half).rev() {
+            if smooth[i] > thresh {
+                cutoff_bin = i;
+                break;
+            }
+        }
+        return cutoff_bin as f32 * bin_hz;
+    }
+
     // Find the cutoff: scan from high frequency down to the first bin where energy clearly rises.
     // First estimate a noise floor (average energy of the topmost slice, usually just noise).
     let tail_start = (FFT_SIZE / 2) * 95 / 100; // take the top 5% of bins as a noise reference
@@ -456,6 +505,8 @@ fn analyze_cutoff(audio: &DecodedAudio, threshold_mult: f64) -> f32 {
         tail.iter().sum::<f64>() / tail.len().max(1) as f64
     };
 
+    // Legacy noise-floor method (--noise-floor). Kept for comparison; the peak-relative method
+    // above is the default because this one false-negatives on clean cuts of weak-HF content.
     // This multiplier is the "how many times above the noise floor counts as real signal" threshold.
     // Too small treats noise as signal (overestimates the cutoff); too large misses weak highs.
     // Calibrated (multiplier swept 4->40 over real lossless vs. fake files):

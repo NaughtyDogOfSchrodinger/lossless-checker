@@ -25,10 +25,18 @@ an **energy cliff** in the spectrum — and that cliff frequency betrays the ori
 
 The tool decodes the audio (via [symphonia](https://github.com/pdeljanov/Symphonia)), runs a
 windowed FFT ([rustfft](https://github.com/ejmahler/RustFFT)) across the **whole track**, averages
-the power spectrum, and finds the highest frequency where energy clearly rises above the noise
-floor. That cutoff frequency is the verdict signal. (It analyzes the full track on purpose: many
-songs open with a quiet intro and only bring in cymbals/percussion later, so sampling just the
-head would underestimate the cutoff and cause false positives.)
+the power spectrum, and finds the cutoff as the highest frequency whose energy still stays within
+~65 dB of the track's own spectral peak (a **peak-relative** threshold). That cutoff frequency is
+the verdict signal.
+
+Two deliberate design points:
+
+- **Peak-relative, not noise-floor-relative.** Referencing the loud mid-band peak (instead of the
+  near-silent top of the spectrum) means a hard low-pass shows up as a true cliff even when the
+  track has little high-frequency energy to begin with — orchestral and vocal transcodes that a
+  noise-floor method reads as "full-band" are caught correctly.
+- **Whole-track analysis.** Many songs open with a quiet intro and only bring in cymbals/percussion
+  later, so sampling just the head would underestimate the cutoff and cause false positives.
 
 ## Build
 
@@ -88,7 +96,7 @@ With `--json` you also get machine-readable output:
 {
   "root": "/Users/you/Music",
   "scanned": 2786,
-  "summary": { "clean": 2086, "narrowed": 515, "suspect": 185, "error": 0 },
+  "summary": { "clean": 2469, "narrowed": 234, "suspect": 83, "error": 0 },
   "results": [
     { "path": "Album/track.flac", "sample_rate": 44100, "cutoff_hz": 12672.0, "ratio": 0.5747, "verdict": "suspect" }
   ]
@@ -97,13 +105,15 @@ With `--json` you also get machine-readable output:
 
 ### Options
 
-| Flag          | Default                 | Description |
-|---------------|-------------------------|-------------|
-| `--threshold` | `10.0`                  | Noise-floor multiplier: how many times above the noise floor a bin must be to count as real signal. Calibrated; override only for debugging. |
-| `--report`    | stdout                  | Write the text report to this file (directory scan only). |
-| `--json`      | —                       | Also write a JSON report to this file (directory scan only). |
-| `--ext`       | `flac,wav,m4a,aif,aiff` | Comma-separated extensions to scan. Lossless containers only — scanning mp3 etc. is pointless for fake-lossless detection. |
-| `--jobs`      | CPU cores               | Number of parallel worker threads. |
+| Flag           | Default                 | Description |
+|----------------|-------------------------|-------------|
+| `--peak-db`    | `65`                    | Peak-relative threshold (dB below the spectral peak) for the default detector. Calibrated; override only for debugging. |
+| `--noise-floor`| off                     | Use the legacy noise-floor detector (with `--threshold`) instead of peak-relative. Kept for comparison. |
+| `--threshold`  | `10.0`                  | Noise-floor multiplier — only used with `--noise-floor`. |
+| `--report`     | stdout                  | Write the text report to this file (directory scan only). |
+| `--json`       | —                       | Also write a JSON report to this file (directory scan only). |
+| `--ext`        | `flac,wav,m4a,aif,aiff` | Comma-separated extensions to scan. Lossless containers only — scanning mp3 etc. is pointless for fake-lossless detection. |
+| `--jobs`       | CPU cores               | Number of parallel worker threads. |
 
 ### Verdict tiers
 
@@ -112,20 +122,23 @@ lossy codecs low-pass at a fixed Hz regardless of the container's sample rate. A
 would wrongly flag perfectly good 48 kHz files (whose real content also stops at ~21–22 kHz — only
 ~88% of their 24 kHz Nyquist).
 
-| Cutoff          | Verdict |
-|-----------------|---------|
-| `≥ 19 kHz`      | ✅ Looks like real lossless |
-| `16.5 – 19 kHz` | ⚠️ Narrowed — possible high-bitrate transcode, check manually |
-| `< 16.5 kHz`    | 🚩 Clear cliff — highly suspect fake lossless |
+| Cutoff           | Verdict |
+|------------------|---------|
+| `≥ 19 kHz`       | ✅ Looks like real lossless |
+| `16.8 – 19 kHz`  | ⚠️ Narrowed — possible high-bitrate transcode, check manually |
+| `< 16.8 kHz`     | 🚩 Clear cliff — highly suspect fake lossless |
 
 ### Calibration
 
-Thresholds were calibrated against a real library of ~2786 FLAC files:
+Tuned against a real library of ~2786 FLAC files **plus known-answer round-trip fakes** — a real
+FLAC re-encoded through 128k/320k MP3 and back, which is a perfect "fake lossless" with a known
+original bitrate:
 
-- **Noise-floor multiplier (10.0):** sweeping 4→40 showed real-lossless cutoffs stay pinned at
-  ~22.5 kHz regardless of the multiplier, while fakes only get exposed at ≥6 (below ~5 the noise
-  floor lifts them to a false 20–22 kHz). 10.0 sits on the stable plateau with margin.
-- **Verdict cutoffs:** genuine files clustered at 19–23 kHz; confirmed transcodes sat at 12–17 kHz.
+- **Peak-db (65):** swept 45→75. Too low collapses even genuine weak-HF tracks; too high lets 128k
+  residue read as full-band again. At 65, every 128k fake lands at **16.0–16.7 kHz** (caught) while
+  genuine lossless clusters at **21–22 kHz**.
+- **Verdict cutoffs:** genuine library files cluster at 19–22 kHz; 128k round-trips sit just under
+  16.8 kHz, so that's the 🚩 line.
 
 ## Limitations
 
@@ -134,8 +147,10 @@ This is a **heuristic**, not proof:
 - **False positives:** classical, acoustic, vocal, ambient, and old recordings naturally have
   little high-frequency energy and may show up as ⚠️ or 🚩. Interludes, skits, and solo-piano
   tracks routinely do. Treat **album-wide** patterns as the real signal, not isolated tracks.
-- **False negatives:** high-bitrate lossy (e.g. 320k MP3) cuts near ~20 kHz and is hard to
-  distinguish from genuine lossless by cutoff alone.
+- **False negatives — 320k is the blind spot.** Round-trip tests show 128k fakes are caught
+  reliably (~16.5 kHz), but 320k MP3 low-passes at ~20 kHz, which overlaps where plenty of genuine
+  lossless naturally rolls off. No cutoff-based metric can separate those, so a 320k transcode will
+  usually read ✅. This tool catches obvious fakes, not the high-bitrate ones.
 - **Performance:** it decodes every track in full, so a large library takes a few minutes (it runs
   on all CPU cores). Single-file checks are near-instant.
 
