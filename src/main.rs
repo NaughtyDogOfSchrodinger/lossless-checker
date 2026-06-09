@@ -1,4 +1,4 @@
-// Fake-lossless detector — step one: analyze a single audio file's high-frequency cutoff.
+// Fake-lossless detector — analyze the high-frequency cutoff of one file or a whole library.
 //
 // Principle: genuine lossless audio (e.g. 16bit/44.1kHz) carries real high-frequency energy
 // that extends naturally toward ~20kHz. When audio is transcoded from a lossy format into FLAC
@@ -9,12 +9,21 @@
 // Note: this is a heuristic, not 100% accurate (classical music and old recordings naturally have
 // little high frequency and may trigger false positives; high-bitrate lossy may slip through). Its
 // value is "batch-flagging the highly suspicious files"; the final call still needs manual review.
+//
+// Pass a single file for a detailed verdict, or a directory to scan the whole library in parallel
+// and emit a ranked text report (+ optional JSON). It is strictly read-only: it never moves or
+// deletes anything.
 
+use std::collections::HashMap;
 use std::fs::File;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clap::Parser;
+use rayon::prelude::*;
 use rustfft::{num_complex::Complex, FftPlanner};
+use serde::Serialize;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::formats::FormatOptions;
@@ -24,15 +33,31 @@ use symphonia::core::probe::Hint;
 
 #[derive(Parser)]
 #[command(name = "lossless-checker")]
-#[command(about = "检测音频文件是否为假无损（有损转码而来）", long_about = None)]
+#[command(about = "检测音频文件是否为假无损（有损转码而来）；可批量扫描整个文件夹", long_about = None)]
 struct Cli {
-    /// Path to the audio file to analyze
-    file: PathBuf,
+    /// Path to a single audio file, or a directory to scan recursively
+    path: PathBuf,
 
     /// Noise-floor multiplier: how many times above the noise floor a bin must be to count as
     /// real signal. The default 10.0 is calibrated against real files; override only for debugging.
     #[arg(long, default_value_t = 10.0)]
     threshold: f64,
+
+    /// Write the text report to this file instead of stdout (directory scan only)
+    #[arg(long)]
+    report: Option<PathBuf>,
+
+    /// Also write a JSON report to this file (directory scan only)
+    #[arg(long)]
+    json: Option<PathBuf>,
+
+    /// Comma-separated extensions to scan (lossless containers only; mp3 etc. are pointless here)
+    #[arg(long, default_value = "flac,wav,m4a,aif,aiff")]
+    ext: String,
+
+    /// Number of parallel worker threads (default: number of CPU cores)
+    #[arg(long)]
+    jobs: Option<usize>,
 }
 
 /// Decoded result: mono PCM samples (multi-channel already mixed down) + sample rate.
@@ -41,10 +66,89 @@ struct DecodedAudio {
     sample_rate: u32,
 }
 
+// Verdict cutoffs in absolute Hz. Lossy encoders low-pass at a fixed Hz (independent of the
+// container sample rate), so an absolute threshold is correct; a fraction-of-Nyquist would wrongly
+// flag 48kHz files whose genuine content also stops at ~21-22kHz. Calibrated on a real library:
+//   genuine lossless -> cutoff 19-23kHz   256k -> ~18-19kHz   128k -> ~16kHz   lower -> 12-15kHz
+const CUTOFF_CLEAN: f32 = 19000.0;
+const CUTOFF_NARROW: f32 = 16500.0;
+
+/// Three-tier verdict, shared by the console output, the text report and the JSON.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Verdict {
+    Clean,
+    Narrowed,
+    Suspect,
+}
+
+impl Verdict {
+    fn icon(self) -> &'static str {
+        match self {
+            Verdict::Clean => "✅",
+            Verdict::Narrowed => "⚠️",
+            Verdict::Suspect => "🚩",
+        }
+    }
+
+    /// Full Chinese sentence used in the single-file detailed output.
+    fn sentence(self) -> &'static str {
+        match self {
+            Verdict::Clean => "✅ 高频延伸正常，像真无损",
+            Verdict::Narrowed => "⚠️  高频有收窄（截止约 16.5-19kHz），可能是高码率有损转码，建议人工复核频谱",
+            Verdict::Suspect => "🚩 高频明显截断（截止 < 16.5kHz），高度疑似假无损（有损转码）",
+        }
+    }
+}
+
+/// Classify a cutoff frequency into a verdict tier.
+fn classify(cutoff_hz: f32) -> Verdict {
+    if cutoff_hz >= CUTOFF_CLEAN {
+        Verdict::Clean
+    } else if cutoff_hz >= CUTOFF_NARROW {
+        Verdict::Narrowed
+    } else {
+        Verdict::Suspect
+    }
+}
+
+/// Per-file analysis summary (no raw samples — just what the reports need).
+struct Analysis {
+    sample_rate: u32,
+    cutoff_hz: f32,
+    ratio: f32,
+    verdict: Verdict,
+}
+
+/// One file's outcome: either an analysis or a decode error (errors are surfaced, never dropped).
+struct Outcome {
+    path: PathBuf,
+    result: Result<Analysis, String>,
+}
+
 fn main() {
     let cli = Cli::parse();
 
-    let decoded = match decode_audio(&cli.file) {
+    if let Some(jobs) = cli.jobs {
+        // Best-effort: ignore the error if a global pool was already built.
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(jobs)
+            .build_global();
+    }
+
+    if cli.path.is_file() {
+        run_single(&cli.path, cli.threshold);
+    } else if cli.path.is_dir() {
+        run_batch(&cli);
+    } else {
+        eprintln!("路径不存在或无法访问: {}", cli.path.display());
+        std::process::exit(1);
+    }
+}
+
+/// Single-file mode: print the detailed per-file verdict (backward-compatible behaviour).
+fn run_single(path: &Path, threshold: f64) {
+    let decoded = match decode_audio(path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("解码失败: {e}");
@@ -52,21 +156,157 @@ fn main() {
         }
     };
 
-    println!("文件: {}", cli.file.display());
-    println!("采样率: {} Hz", decoded.sample_rate);
-    println!("采样总数: {}", decoded.samples.len());
-
     if decoded.samples.is_empty() {
         eprintln!("没有解码出任何采样");
         std::process::exit(1);
     }
 
-    let cutoff = analyze_cutoff(&decoded, cli.threshold);
-    report(&decoded, cutoff);
+    let cutoff = analyze_cutoff(&decoded, threshold);
+    let nyquist = decoded.sample_rate as f32 / 2.0;
+    let ratio = cutoff / nyquist;
+
+    println!("文件: {}", path.display());
+    println!("采样率: {} Hz", decoded.sample_rate);
+    println!("采样总数: {}", decoded.samples.len());
+    println!("奈奎斯特频率: {:.0} Hz", nyquist);
+    println!(
+        "估计高频截止: {:.0} Hz ({:.1}% of Nyquist)",
+        cutoff,
+        ratio * 100.0
+    );
+    println!();
+    println!("判断: {}", classify(cutoff).sentence());
+    println!();
+    println!("（提示：古典乐、人声、老录音本身高频能量就少，可能误报；");
+    println!("  建议对可疑文件用 Spek 等工具看一眼频谱图再下结论。）");
+}
+
+/// Directory mode: scan in parallel, then write the text report (and optional JSON).
+fn run_batch(cli: &Cli) {
+    let exts: Vec<String> = cli
+        .ext
+        .split(',')
+        .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect();
+
+    eprintln!("收集音频文件中… (扩展名: {})", exts.join(", "));
+    let mut files = collect_audio_files(&cli.path, &exts);
+    files.sort();
+
+    if files.is_empty() {
+        eprintln!("在 {} 下没有找到匹配的音频文件", cli.path.display());
+        std::process::exit(1);
+    }
+
+    let total = files.len();
+    eprintln!("找到 {total} 个文件，开始扫描…");
+
+    let done = AtomicUsize::new(0);
+    let threshold = cli.threshold;
+    let mut outcomes: Vec<Outcome> = files
+        .par_iter()
+        .map(|p| {
+            let o = analyze_file(p, threshold);
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % 25 == 0 || n == total {
+                eprint!("\r扫描中… {n}/{total}");
+                let _ = io::stderr().flush();
+            }
+            o
+        })
+        .collect();
+    eprintln!();
+    // Deterministic ordering for the report regardless of thread completion order.
+    outcomes.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let text = build_text_report(&cli.path, &outcomes);
+    match &cli.report {
+        Some(p) => match std::fs::write(p, &text) {
+            Ok(()) => eprintln!("文本报告已写入: {}", p.display()),
+            Err(e) => {
+                eprintln!("写文本报告失败 ({}): {e}", p.display());
+                std::process::exit(1);
+            }
+        },
+        None => print!("{text}"),
+    }
+
+    if let Some(p) = &cli.json {
+        let json = build_json(&cli.path, &outcomes);
+        let serialized = match serde_json::to_string_pretty(&json) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("序列化 JSON 失败: {e}");
+                std::process::exit(1);
+            }
+        };
+        match std::fs::write(p, serialized) {
+            Ok(()) => eprintln!("JSON 报告已写入: {}", p.display()),
+            Err(e) => {
+                eprintln!("写 JSON 报告失败 ({}): {e}", p.display());
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// Recursively collect files whose extension matches `exts`. Skips symlinked directories to avoid
+/// cycles; unreadable entries are silently skipped (they can't be audio we care about).
+fn collect_audio_files(root: &Path, exts: &[String]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    collect_into(root, exts, &mut out);
+    out
+}
+
+fn collect_into(dir: &Path, exts: &[String], out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Use symlink-aware metadata so we never follow a symlinked directory into a loop.
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.is_dir() {
+            if !meta.file_type().is_symlink() {
+                collect_into(&path, exts, out);
+            }
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if exts.iter().any(|want| want == &ext.to_ascii_lowercase()) {
+                out.push(path);
+            }
+        }
+    }
+}
+
+/// Decode + analyze one file, capturing any failure as an error string (never panics).
+fn analyze_file(path: &Path, threshold: f64) -> Outcome {
+    let result = (|| {
+        let decoded = decode_audio(path)?;
+        if decoded.samples.is_empty() {
+            return Err("没有解码出任何采样".to_string());
+        }
+        let cutoff = analyze_cutoff(&decoded, threshold);
+        let nyquist = decoded.sample_rate as f32 / 2.0;
+        Ok(Analysis {
+            sample_rate: decoded.sample_rate,
+            cutoff_hz: cutoff,
+            ratio: if nyquist > 0.0 { cutoff / nyquist } else { 0.0 },
+            verdict: classify(cutoff),
+        })
+    })();
+    Outcome {
+        path: path.to_path_buf(),
+        result,
+    }
 }
 
 /// Decode an audio file with symphonia, mixing all channels down to mono.
-fn decode_audio(path: &PathBuf) -> Result<DecodedAudio, String> {
+fn decode_audio(path: &Path) -> Result<DecodedAudio, String> {
     let file = File::open(path).map_err(|e| format!("打不开文件: {e}"))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -97,10 +337,10 @@ fn decode_audio(path: &PathBuf) -> Result<DecodedAudio, String> {
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("无法创建解码器: {e}"))?;
 
-    // Only decode the first ~40s — enough for a stable high-frequency spectrum, far faster than
-    // decoding full-length tracks.
-    const ANALYZE_SECONDS: usize = 40;
-
+    // Decode the whole track. We deliberately do NOT early-stop after the first N seconds: many
+    // songs (especially ballads) open with a quiet piano/vocal intro and only bring in the
+    // high-frequency content — cymbals, percussion — later. Sampling just the intro underestimates
+    // the cutoff and produces false positives. Throughput comes from parallelism instead (rayon).
     let mut samples: Vec<f32> = Vec::new();
     let mut sample_rate: u32 = track.codec_params.sample_rate.unwrap_or(0);
     let mut channels: usize = 0;
@@ -129,15 +369,6 @@ fn decode_audio(path: &PathBuf) -> Result<DecodedAudio, String> {
                     SampleBuffer::<f32>::new(audio_buf.capacity() as u64, spec);
                 sample_buf.copy_interleaved_ref(audio_buf);
                 samples.extend_from_slice(sample_buf.samples());
-
-                // The high-frequency cutoff is a global property of the track, stable after a
-                // short stretch, so there's no need to decode the whole song. Stop once we have
-                // enough audio (~ANALYZE_SECONDS); this is the dominant cost, so it's a big speedup.
-                if channels > 0
-                    && samples.len() >= sample_rate as usize * channels * ANALYZE_SECONDS
-                {
-                    break;
-                }
             }
             Err(symphonia::core::errors::Error::DecodeError(_)) => continue, // skip bad frames
             Err(e) => return Err(format!("解码出错: {e}")),
@@ -246,34 +477,215 @@ fn analyze_cutoff(audio: &DecodedAudio, threshold_mult: f64) -> f32 {
     cutoff_bin as f32 * bin_hz
 }
 
-/// Turn the cutoff frequency and sample rate into a human-readable verdict.
-fn report(audio: &DecodedAudio, cutoff_hz: f32) {
-    let nyquist = audio.sample_rate as f32 / 2.0;
-    let ratio = cutoff_hz / nyquist; // cutoff as a fraction of the Nyquist frequency
-
-    println!("奈奎斯特频率: {:.0} Hz", nyquist);
-    println!("估计高频截止: {:.0} Hz ({:.1}% of Nyquist)", cutoff_hz, ratio * 100.0);
-    println!();
-
-    // The verdict uses the absolute cutoff frequency (Hz) rather than a fraction of Nyquist:
-    // lossy encoders low-pass at a fixed Hz (independent of the container sample rate), so a ratio
-    // would wrongly flag 48kHz files (Nyquist 24kHz; genuine lossless also stops at ~21-22kHz, a
-    // mere ~88% that looks suspicious). The thresholds below come from calibration on a real library:
-    //   genuine lossless -> cutoff 19-23kHz (320k transcodes also often sit ~20kHz, hard to tell apart)
-    //   256k transcode   -> cutoff ~18-19kHz
-    //   128k transcode   -> cutoff ~16kHz  -- strongly suspect
-    //   lower bitrate    -> cutoff 12-15kHz -- almost certainly fake lossless
-    let _ = ratio; // ratio is shown for info only; it does not drive the verdict
-    let verdict = if cutoff_hz >= 19000.0 {
-        "✅ 高频延伸正常，像真无损"
-    } else if cutoff_hz >= 16500.0 {
-        "⚠️  高频有收窄（截止约 16.5-19kHz），可能是高码率有损转码，建议人工复核频谱"
+/// First path component below `root` — used as the "album" bucket for aggregation. Files sitting
+/// directly under root are grouped under a placeholder.
+fn album_of(root: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let comps: Vec<_> = rel.components().collect();
+    if comps.len() > 1 {
+        comps[0].as_os_str().to_string_lossy().into_owned()
     } else {
-        "🚩 高频明显截断（截止 < 16.5kHz），高度疑似假无损（有损转码）"
-    };
+        "(根目录直属文件)".to_string()
+    }
+}
 
-    println!("判断: {verdict}");
-    println!();
-    println!("（提示：古典乐、人声、老录音本身高频能量就少，可能误报；");
-    println!("  建议对可疑文件用 Spek 等工具看一眼频谱图再下结论。）");
+/// Path shown in the report, relative to the scan root when possible.
+fn rel_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Build the human-readable text report.
+fn build_text_report(root: &Path, outcomes: &[Outcome]) -> String {
+    use std::fmt::Write as _;
+
+    let mut clean = 0usize;
+    let mut narrowed = 0usize;
+    let mut suspect = 0usize;
+    let mut errors: Vec<(&PathBuf, &str)> = Vec::new();
+    // (cutoff, verdict, path) for every flagged track
+    let mut flagged: Vec<(f32, Verdict, &PathBuf)> = Vec::new();
+    // album -> [suspect_count, narrowed_count]
+    let mut albums: HashMap<String, [usize; 2]> = HashMap::new();
+
+    for o in outcomes {
+        match &o.result {
+            Ok(a) => match a.verdict {
+                Verdict::Clean => clean += 1,
+                Verdict::Narrowed | Verdict::Suspect => {
+                    if a.verdict == Verdict::Suspect {
+                        suspect += 1;
+                    } else {
+                        narrowed += 1;
+                    }
+                    flagged.push((a.cutoff_hz, a.verdict, &o.path));
+                    let slot = albums.entry(album_of(root, &o.path)).or_insert([0, 0]);
+                    if a.verdict == Verdict::Suspect {
+                        slot[0] += 1;
+                    } else {
+                        slot[1] += 1;
+                    }
+                }
+            },
+            Err(e) => errors.push((&o.path, e)),
+        }
+    }
+
+    // Suspect first, then narrowed; within each tier by cutoff ascending (worst at the top).
+    flagged.sort_by(|a, b| {
+        let rank = |v: Verdict| if v == Verdict::Suspect { 0 } else { 1 };
+        rank(a.1)
+            .cmp(&rank(b.1))
+            .then(a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    let mut album_rank: Vec<(&String, &[usize; 2])> = albums.iter().collect();
+    album_rank.sort_by(|a, b| b.1[0].cmp(&a.1[0]).then(b.1[1].cmp(&a.1[1])).then(a.0.cmp(b.0)));
+
+    let mut s = String::new();
+    let _ = writeln!(s, "假无损批量扫描报告");
+    let _ = writeln!(s, "生成时间: {}", now_string());
+    let _ = writeln!(s, "扫描根目录: {}", root.display());
+    let _ = writeln!(s, "文件总数: {}", outcomes.len());
+    let _ = writeln!(s);
+    let _ = writeln!(s, "== 汇总 ==");
+    let _ = writeln!(s, "  ✅ 像真无损 (≥19kHz)        {clean}");
+    let _ = writeln!(s, "  ⚠️  高频收窄 (16.5-19kHz)    {narrowed}");
+    let _ = writeln!(s, "  🚩 高度可疑 (<16.5kHz)      {suspect}");
+    let _ = writeln!(s, "  ✖  解码失败                 {}", errors.len());
+    let _ = writeln!(s);
+    let _ = writeln!(
+        s,
+        "启发式判断：古典/人声/老录音/间奏(interlude)/skit 本身高频就少，可能误报；"
+    );
+    let _ = writeln!(s, "整张专辑同档位低截止＝来源八成有损，这是最强信号。可疑文件请用 Spek 复核。");
+
+    let _ = writeln!(s);
+    let _ = writeln!(s, "== 按专辑排行（🚩 数量降序）==");
+    if album_rank.iter().all(|(_, c)| c[0] == 0) {
+        let _ = writeln!(s, "  （无 🚩 文件）");
+    }
+    for (name, c) in album_rank.iter().filter(|(_, c)| c[0] > 0) {
+        let _ = writeln!(s, "  🚩{:>3}  ⚠️{:>3}  {}", c[0], c[1], name);
+    }
+
+    let _ = writeln!(s);
+    let _ = writeln!(s, "== 可疑文件清单（🚩 在前，各按截止频率升序）==");
+    if flagged.is_empty() {
+        let _ = writeln!(s, "  （无）");
+    }
+    for (cutoff, verdict, path) in &flagged {
+        let _ = writeln!(
+            s,
+            "  {:>6.0} Hz  {}  {}",
+            cutoff,
+            verdict.icon(),
+            rel_display(root, path)
+        );
+    }
+
+    if !errors.is_empty() {
+        let _ = writeln!(s);
+        let _ = writeln!(s, "== 解码失败（未参与判定，需人工检查）==");
+        for (path, err) in &errors {
+            let _ = writeln!(s, "  ✖  {}  — {}", rel_display(root, path), err);
+        }
+    }
+
+    s
+}
+
+/// JSON shapes (serialized with serde — handles paths containing CJK/quotes correctly).
+#[derive(Serialize)]
+struct SummaryJson {
+    clean: usize,
+    narrowed: usize,
+    suspect: usize,
+    error: usize,
+}
+
+#[derive(Serialize)]
+struct ResultJson {
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sample_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cutoff_hz: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ratio: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict: Option<Verdict>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ReportJson {
+    root: String,
+    scanned: usize,
+    summary: SummaryJson,
+    results: Vec<ResultJson>,
+}
+
+/// Build the JSON report structure.
+fn build_json(root: &Path, outcomes: &[Outcome]) -> ReportJson {
+    let mut summary = SummaryJson {
+        clean: 0,
+        narrowed: 0,
+        suspect: 0,
+        error: 0,
+    };
+    let mut results = Vec::with_capacity(outcomes.len());
+
+    for o in outcomes {
+        let path = rel_display(root, &o.path);
+        match &o.result {
+            Ok(a) => {
+                match a.verdict {
+                    Verdict::Clean => summary.clean += 1,
+                    Verdict::Narrowed => summary.narrowed += 1,
+                    Verdict::Suspect => summary.suspect += 1,
+                }
+                results.push(ResultJson {
+                    path,
+                    sample_rate: Some(a.sample_rate),
+                    cutoff_hz: Some(a.cutoff_hz.round()),
+                    ratio: Some((a.ratio * 10000.0).round() / 10000.0),
+                    verdict: Some(a.verdict),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                summary.error += 1;
+                results.push(ResultJson {
+                    path,
+                    sample_rate: None,
+                    cutoff_hz: None,
+                    ratio: None,
+                    verdict: None,
+                    error: Some(e.clone()),
+                });
+            }
+        }
+    }
+
+    ReportJson {
+        root: root.to_string_lossy().into_owned(),
+        scanned: outcomes.len(),
+        summary,
+        results,
+    }
+}
+
+/// Local timestamp via the `date` command; empty string if it isn't available.
+fn now_string() -> String {
+    std::process::Command::new("date")
+        .arg("+%Y-%m-%d %H:%M:%S")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }

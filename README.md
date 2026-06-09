@@ -25,11 +25,11 @@ That cutoff frequency is the verdict signal.
 
 ## Usage
 
+**Single file** — detailed verdict:
+
 ```bash
 cargo run --release -- "path/to/song.flac"
 ```
-
-Example output:
 
 ```
 文件: song.flac
@@ -41,11 +41,25 @@ Example output:
 判断: ✅ 高频延伸正常，像真无损
 ```
 
+**Whole library** — pass a directory to scan it recursively (in parallel) and emit a ranked
+report. Strictly read-only: it never moves or deletes anything.
+
+```bash
+cargo run --release -- ~/Music --report scan.txt --json scan.json
+```
+
+The text report contains a summary, an album ranking (by 🚩 count), the full suspect list (🚩 then
+⚠️, sorted by cutoff), and a list of files that failed to decode (surfaced, never silently dropped).
+
 ### Options
 
-| Flag          | Default | Description |
-|---------------|---------|-------------|
-| `--threshold` | `10.0`  | Noise-floor multiplier: how many times above the noise floor a bin must be to count as real signal. Calibrated; override only for debugging. |
+| Flag          | Default              | Description |
+|---------------|----------------------|-------------|
+| `--threshold` | `10.0`               | Noise-floor multiplier: how many times above the noise floor a bin must be to count as real signal. Calibrated; override only for debugging. |
+| `--report`    | stdout               | Write the text report to this file (directory scan only). |
+| `--json`      | —                    | Also write a JSON report to this file (directory scan only). |
+| `--ext`       | `flac,wav,m4a,aif,aiff` | Comma-separated extensions to scan. Lossless containers only — scanning mp3 etc. is pointless for fake-lossless detection. |
+| `--jobs`      | CPU cores            | Number of parallel worker threads. |
 
 ### Verdict tiers
 
