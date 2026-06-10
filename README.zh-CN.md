@@ -118,33 +118,33 @@ sudo apt install ffmpeg
 cargo run --release -- "path/to/song.flac"
 ```
 
-> 注：程序输出为英文。
+> 输出默认中文；加 `--lang en` 切换为英文。机器可读的 JSON 报告不受语言影响。
 
 ```
-File: song.flac
-Format: FLAC
-Sample rate: 48000 Hz
-Total samples: 12582912
-Nyquist frequency: 24000 Hz
-Estimated HF cutoff: 20795 Hz (86.6% of Nyquist)
-Spectral holes: none significant
+文件: song.flac
+格式: FLAC
+采样率: 48000 Hz
+采样总数: 12582912
+奈奎斯特频率: 24000 Hz
+估计高频截止: 20795 Hz (86.6% of Nyquist)
+频谱空洞: 无明显空洞
 
-Verdict: ✅ High frequencies extend naturally — looks like genuine lossless
+判断: ✅ 高频延伸正常，像真无损
 ```
 
-声称 Hi-Res 但实为上采样的文件会多出一行 `HF extension` 并给出 🔼 判定：
+声称 Hi-Res 但实为上采样的文件会多出一行 `高频延伸` 并给出 🔼 判定：
 
 ```
-File: fake96.flac
-Format: FLAC
-Sample rate: 96000 Hz
-Total samples: 288000
-Nyquist frequency: 48000 Hz
-Estimated HF cutoff: 24598 Hz (51.2% of Nyquist)
-HF extension (>26kHz): -114.3 dB (relative to spectral peak; lower = emptier highs)
-Spectral holes: none significant
+文件: fake96.flac
+格式: FLAC
+采样率: 96000 Hz
+采样总数: 288000
+奈奎斯特频率: 48000 Hz
+估计高频截止: 24598 Hz (51.2% of Nyquist)
+高频延伸(>26kHz): -114.3 dB (相对频谱峰值；越低代表高频越空)
+频谱空洞: 无明显空洞
 
-Verdict: 🔼 Declared as Hi-Res, but real content stops at the ~CD band — likely upsampled / lossy-sourced fake Hi-Res
+判断: 🔼 声称为 Hi-Res，但真实内容止于 ~CD 频段，疑似上采样/有损转制的假 Hi-Res
 ```
 
 **整库批量** —— 传一个目录即可递归、并行扫描，输出排好序的报告：
@@ -157,18 +157,18 @@ cargo run --release -- ~/Music --report scan.txt --json scan.json
 信号）、完整可疑清单（🚩/🔼 在前、按截止频率升序），以及**解码失败清单**（显式列出，绝不静默跳过）：
 
 ```
-== Summary ==
-  ✅ Likely lossless (≥19kHz)     2086
-  ⚠️  Narrowed HF (16.5-19kHz)     515
-  🚩 Highly suspect (<16.5kHz)    185
-  🔼 Fake Hi-Res (upsampled)      12
-  ✖  Decode failed                0
+== 汇总 ==
+  ✅ 像真无损 (≥19kHz)          2086
+  ⚠️  高频收窄 (16.5-19kHz)      515
+  🚩 高度可疑 (<16.5kHz)        185
+  🔼 假 Hi-Res (上采样)          12
+  ✖  解码失败                   0
 
-== Albums ranked (by 🚩/🔼 count, descending) ==
+== 按专辑排行（🚩/🔼 数量降序） ==
   🚩/🔼 15  ⚠️  0  Some Artist - Debut Album (2006)
   ...
 
-== Flagged files (🚩/🔼 first, each by cutoff ascending) ==
+== 可疑文件清单（🚩/🔼 在前，各按截止频率升序） ==
    12672 Hz  🚩  Some Artist - Album/03. track.flac
    24598 Hz  🔼  Some Artist - Hi-Res Album/01. track.flac
    17800 Hz  ⚠️  Other Artist - Album/05. track.flac
@@ -201,6 +201,7 @@ cargo run --release -- ~/Music --report scan.txt --json scan.json
 | `--json`       | —                       | 额外把 JSON 报告写到此文件（仅目录扫描）。 |
 | `--ext`        | `flac,wav,m4a,aif,aiff,caf,alac,dsf,dff` | 逗号分隔的扫描扩展名。只扫无损容器 + DSD——扫 mp3 等本身有损的格式对检测假无损没有意义。 |
 | `--jobs`       | CPU 核数                | 并行线程数。 |
+| `--lang`       | `zh`                    | 日志与报告的语言：`zh`（中文，默认）或 `en`。JSON 报告不受影响。 |
 
 ### 判定区间
 

@@ -15,6 +15,8 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+use crate::i18n::Lang;
+
 /// PCM rate we decimate DSD to. Above 48k, so DSD stays in the hi-res branch (its
 /// authenticity check is the same "does real content extend past the CD wall" question);
 /// ffmpeg's decimation also removes the DSD ultrasonic noise-shaping that would otherwise
@@ -30,21 +32,22 @@ pub struct DecodedAudio {
 }
 
 /// Decode an audio file to mono f32 PCM. Dispatches DSD to the ffmpeg fallback.
-pub fn decode_audio(path: &Path) -> Result<DecodedAudio, String> {
+pub fn decode_audio(path: &Path, lang: Lang) -> Result<DecodedAudio, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase());
     if matches!(ext.as_deref(), Some("dsf") | Some("dff")) {
-        decode_dsd_ffmpeg(path)
+        decode_dsd_ffmpeg(path, lang)
     } else {
-        decode_symphonia(path)
+        decode_symphonia(path, lang)
     }
 }
 
 /// Decode with symphonia, mixing all channels down to mono.
-fn decode_symphonia(path: &Path) -> Result<DecodedAudio, String> {
-    let file = File::open(path).map_err(|e| format!("cannot open file: {e}"))?;
+fn decode_symphonia(path: &Path, lang: Lang) -> Result<DecodedAudio, String> {
+    let file = File::open(path)
+        .map_err(|e| format!("{}: {e}", lang.pick("打不开文件", "cannot open file")))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     // Use the file extension as a hint to help the probe identify the format.
@@ -60,13 +63,13 @@ fn decode_symphonia(path: &Path) -> Result<DecodedAudio, String> {
             &FormatOptions::default(),
             &MetadataOptions::default(),
         )
-        .map_err(|e| format!("unrecognized audio format: {e}"))?;
+        .map_err(|e| format!("{}: {e}", lang.pick("无法识别音频格式", "unrecognized audio format")))?;
 
     let mut format = probed.format;
 
     let track = format
         .default_track()
-        .ok_or_else(|| "no audio track found".to_string())?;
+        .ok_or_else(|| lang.pick("找不到音频轨", "no audio track found").to_string())?;
     let track_id = track.id;
 
     let format_label = symphonia::default::get_codecs()
@@ -76,7 +79,7 @@ fn decode_symphonia(path: &Path) -> Result<DecodedAudio, String> {
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| format!("cannot create decoder: {e}"))?;
+        .map_err(|e| format!("{}: {e}", lang.pick("无法创建解码器", "cannot create decoder")))?;
 
     // Decode the whole track (no early stop — see spectrum::avg_power_spectrum for why).
     let mut samples: Vec<f32> = Vec::new();
@@ -102,12 +105,14 @@ fn decode_symphonia(path: &Path) -> Result<DecodedAudio, String> {
                 samples.extend_from_slice(sample_buf.samples());
             }
             Err(symphonia::core::errors::Error::DecodeError(_)) => continue, // skip bad frames
-            Err(e) => return Err(format!("decode error: {e}")),
+            Err(e) => return Err(format!("{}: {e}", lang.pick("解码出错", "decode error"))),
         }
     }
 
     if sample_rate == 0 {
-        return Err("could not determine sample rate".to_string());
+        return Err(lang
+            .pick("无法确定采样率", "could not determine sample rate")
+            .to_string());
     }
 
     Ok(DecodedAudio {
@@ -118,7 +123,7 @@ fn decode_symphonia(path: &Path) -> Result<DecodedAudio, String> {
 }
 
 /// Decode DSD (.dsf/.dff) via an ffmpeg subprocess to mono f32 PCM at `DSD_PCM_RATE`.
-fn decode_dsd_ffmpeg(path: &Path) -> Result<DecodedAudio, String> {
+fn decode_dsd_ffmpeg(path: &Path, lang: Lang) -> Result<DecodedAudio, String> {
     let output = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(path)
@@ -132,15 +137,29 @@ fn decode_dsd_ffmpeg(path: &Path) -> Result<DecodedAudio, String> {
             "-",
         ])
         .output()
-        .map_err(|e| format!("ffmpeg is required to decode DSD (.dsf/.dff); please install ffmpeg: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "{}: {e}",
+                lang.pick(
+                    "需要 ffmpeg 处理 DSD（.dsf/.dff），请先安装 ffmpeg",
+                    "ffmpeg is required to decode DSD (.dsf/.dff); please install ffmpeg",
+                )
+            )
+        })?;
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffmpeg failed to decode DSD: {}", err.trim()));
+        return Err(format!(
+            "{}: {}",
+            lang.pick("ffmpeg 解码 DSD 失败", "ffmpeg failed to decode DSD"),
+            err.trim()
+        ));
     }
 
     if output.stdout.len() < 4 {
-        return Err("ffmpeg produced no PCM data".to_string());
+        return Err(lang
+            .pick("ffmpeg 没有输出 PCM 数据", "ffmpeg produced no PCM data")
+            .to_string());
     }
 
     let samples: Vec<f32> = output

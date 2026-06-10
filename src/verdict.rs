@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 
+use crate::i18n::Lang;
 use crate::spectrum::SpectralFeatures;
 
 // CD-rate cutoffs in absolute Hz. Lossy encoders low-pass at a fixed Hz (independent of the
@@ -41,18 +42,24 @@ impl Verdict {
     }
 
     /// Full sentence used in the single-file detailed output.
-    pub fn sentence(self) -> &'static str {
+    pub fn sentence(self, lang: Lang) -> &'static str {
         match self {
-            Verdict::Clean => "✅ High frequencies extend naturally — looks like genuine lossless",
-            Verdict::Narrowed => {
-                "⚠️  High frequencies are narrowed (cutoff ~16.5-19kHz) — possibly a high-bitrate lossy transcode; review the spectrum manually"
-            }
-            Verdict::Suspect => {
-                "🚩 High frequencies are clearly cut (cutoff < 16.5kHz) — highly likely fake lossless (lossy transcode)"
-            }
-            Verdict::Upsampled => {
-                "🔼 Declared as Hi-Res, but real content stops at the ~CD band — likely upsampled / lossy-sourced fake Hi-Res"
-            }
+            Verdict::Clean => lang.pick(
+                "✅ 高频延伸正常，像真无损",
+                "✅ High frequencies extend naturally — looks like genuine lossless",
+            ),
+            Verdict::Narrowed => lang.pick(
+                "⚠️  高频有收窄（截止约 16.5-19kHz），可能是高码率有损转码，建议人工复核频谱",
+                "⚠️  High frequencies are narrowed (cutoff ~16.5-19kHz) — possibly a high-bitrate lossy transcode; review the spectrum manually",
+            ),
+            Verdict::Suspect => lang.pick(
+                "🚩 高频明显截断（截止 < 16.5kHz），高度疑似假无损（有损转码）",
+                "🚩 High frequencies are clearly cut (cutoff < 16.5kHz) — highly likely fake lossless (lossy transcode)",
+            ),
+            Verdict::Upsampled => lang.pick(
+                "🔼 声称为 Hi-Res，但真实内容止于 ~CD 频段，疑似上采样/有损转制的假 Hi-Res",
+                "🔼 Declared as Hi-Res, but real content stops at the ~CD band — likely upsampled / lossy-sourced fake Hi-Res",
+            ),
         }
     }
 }

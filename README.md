@@ -120,10 +120,13 @@ and moves on — the rest of the scan is unaffected.
 
 ## Usage
 
+> Logs and reports default to **Chinese**. Pass `--lang en` for English (as shown in the examples
+> below). The machine-readable JSON report is the same regardless of language.
+
 **Single file** — detailed verdict:
 
 ```bash
-cargo run --release -- "path/to/song.flac"
+cargo run --release -- "path/to/song.flac" --lang en
 ```
 
 ```
@@ -209,6 +212,7 @@ With `--json` you also get machine-readable output. Hi-Res files additionally ca
 | `--json`       | —                       | Also write a JSON report to this file (directory scan only). |
 | `--ext`        | `flac,wav,m4a,aif,aiff,caf,alac,dsf,dff` | Comma-separated extensions to scan. Lossless containers + DSD only — scanning mp3 etc. is pointless for fake-lossless detection. |
 | `--jobs`       | CPU cores               | Number of parallel worker threads. |
+| `--lang`       | `zh`                    | Output language for logs and reports: `zh` (中文, default) or `en`. The JSON report is unaffected. |
 
 ### Verdict tiers
 

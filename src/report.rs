@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::i18n::Lang;
 use crate::verdict::{Analysis, Verdict};
 
 /// One file's outcome: either an analysis or a decode error (errors are surfaced, never dropped).
@@ -15,13 +16,14 @@ pub struct Outcome {
 
 /// First path component below `root` — the "album" bucket for aggregation. Files directly
 /// under root are grouped under a placeholder.
-fn album_of(root: &Path, path: &Path) -> String {
+fn album_of(root: &Path, path: &Path, lang: Lang) -> String {
     let rel = path.strip_prefix(root).unwrap_or(path);
     let comps: Vec<_> = rel.components().collect();
     if comps.len() > 1 {
         comps[0].as_os_str().to_string_lossy().into_owned()
     } else {
-        "(files directly under root)".to_string()
+        lang.pick("(根目录直属文件)", "(files directly under root)")
+            .to_string()
     }
 }
 
@@ -39,7 +41,7 @@ fn is_flagged(v: Verdict) -> bool {
 }
 
 /// Build the human-readable text report.
-pub fn build_text_report(root: &Path, outcomes: &[Outcome]) -> String {
+pub fn build_text_report(root: &Path, outcomes: &[Outcome], lang: Lang) -> String {
     use std::fmt::Write as _;
 
     let mut clean = 0usize;
@@ -63,7 +65,7 @@ pub fn build_text_report(root: &Path, outcomes: &[Outcome]) -> String {
                 }
                 if is_flagged(a.verdict) {
                     flagged.push((a.cutoff_hz, a.verdict, &o.path));
-                    let slot = albums.entry(album_of(root, &o.path)).or_insert([0, 0]);
+                    let slot = albums.entry(album_of(root, &o.path, lang)).or_insert([0, 0]);
                     match a.verdict {
                         Verdict::Narrowed => slot[1] += 1,
                         _ => slot[0] += 1, // suspect + upsampled
@@ -86,37 +88,48 @@ pub fn build_text_report(root: &Path, outcomes: &[Outcome]) -> String {
     album_rank.sort_by(|a, b| b.1[0].cmp(&a.1[0]).then(b.1[1].cmp(&a.1[1])).then(a.0.cmp(b.0)));
 
     let mut s = String::new();
-    let _ = writeln!(s, "Fake-lossless batch scan report");
-    let _ = writeln!(s, "Generated: {}", now_string());
-    let _ = writeln!(s, "Scan root: {}", root.display());
-    let _ = writeln!(s, "Total files: {}", outcomes.len());
+    let _ = writeln!(s, "{}", lang.pick("假无损批量扫描报告", "Fake-lossless batch scan report"));
+    let _ = writeln!(s, "{}: {}", lang.pick("生成时间", "Generated"), now_string());
+    let _ = writeln!(s, "{}: {}", lang.pick("扫描根目录", "Scan root"), root.display());
+    let _ = writeln!(s, "{}: {}", lang.pick("文件总数", "Total files"), outcomes.len());
     let _ = writeln!(s);
-    let _ = writeln!(s, "== Summary ==");
-    let _ = writeln!(s, "  ✅ Likely lossless (≥19kHz)     {clean}");
-    let _ = writeln!(s, "  ⚠️  Narrowed HF (16.5-19kHz)     {narrowed}");
-    let _ = writeln!(s, "  🚩 Highly suspect (<16.5kHz)    {suspect}");
-    let _ = writeln!(s, "  🔼 Fake Hi-Res (upsampled)      {upsampled}");
-    let _ = writeln!(s, "  ✖  Decode failed                {}", errors.len());
+    let _ = writeln!(s, "== {} ==", lang.pick("汇总", "Summary"));
+    let _ = writeln!(s, "  {}  {clean}", lang.pick("✅ 像真无损 (≥19kHz)        ", "✅ Likely lossless (≥19kHz)    "));
+    let _ = writeln!(s, "  {}  {narrowed}", lang.pick("⚠️  高频收窄 (16.5-19kHz)    ", "⚠️  Narrowed HF (16.5-19kHz)    "));
+    let _ = writeln!(s, "  {}  {suspect}", lang.pick("🚩 高度可疑 (<16.5kHz)      ", "🚩 Highly suspect (<16.5kHz)   "));
+    let _ = writeln!(s, "  {}  {upsampled}", lang.pick("🔼 假 Hi-Res (上采样)        ", "🔼 Fake Hi-Res (upsampled)     "));
+    let _ = writeln!(s, "  {}  {}", lang.pick("✖  解码失败                 ", "✖  Decode failed               "), errors.len());
     let _ = writeln!(s);
     let _ = writeln!(
         s,
-        "Heuristic: classical/vocal/old recordings/interludes/skits naturally have little HF and may false-positive;"
+        "{}",
+        lang.pick(
+            "启发式判断：古典/人声/老录音/间奏(interlude)/skit 本身高频就少，可能误报；",
+            "Heuristic: classical/vocal/old recordings/interludes/skits naturally have little HF and may false-positive;"
+        )
     );
-    let _ = writeln!(s, "a whole album sharing the same low cutoff is the strongest signal of a lossy source. Verify suspects with Spek.");
+    let _ = writeln!(
+        s,
+        "{}",
+        lang.pick(
+            "整张专辑同档位低截止＝来源八成有损，这是最强信号。可疑文件请用 Spek 复核。",
+            "a whole album sharing the same low cutoff is the strongest signal of a lossy source. Verify suspects with Spek."
+        )
+    );
 
     let _ = writeln!(s);
-    let _ = writeln!(s, "== Albums ranked (by 🚩/🔼 count, descending) ==");
+    let _ = writeln!(s, "== {} ==", lang.pick("按专辑排行（🚩/🔼 数量降序）", "Albums ranked (by 🚩/🔼 count, descending)"));
     if album_rank.iter().all(|(_, c)| c[0] == 0) {
-        let _ = writeln!(s, "  (no 🚩/🔼 files)");
+        let _ = writeln!(s, "  {}", lang.pick("（无 🚩/🔼 文件）", "(no 🚩/🔼 files)"));
     }
     for (name, c) in album_rank.iter().filter(|(_, c)| c[0] > 0) {
         let _ = writeln!(s, "  🚩/🔼{:>3}  ⚠️{:>3}  {}", c[0], c[1], name);
     }
 
     let _ = writeln!(s);
-    let _ = writeln!(s, "== Flagged files (🚩/🔼 first, each by cutoff ascending) ==");
+    let _ = writeln!(s, "== {} ==", lang.pick("可疑文件清单（🚩/🔼 在前，各按截止频率升序）", "Flagged files (🚩/🔼 first, each by cutoff ascending)"));
     if flagged.is_empty() {
-        let _ = writeln!(s, "  (none)");
+        let _ = writeln!(s, "  {}", lang.pick("（无）", "(none)"));
     }
     for (cutoff, verdict, path) in &flagged {
         let _ = writeln!(
@@ -130,7 +143,7 @@ pub fn build_text_report(root: &Path, outcomes: &[Outcome]) -> String {
 
     if !errors.is_empty() {
         let _ = writeln!(s);
-        let _ = writeln!(s, "== Decode failures (not classified; check manually) ==");
+        let _ = writeln!(s, "== {} ==", lang.pick("解码失败（未参与判定，需人工检查）", "Decode failures (not classified; check manually)"));
         for (path, err) in &errors {
             let _ = writeln!(s, "  ✖  {}  — {}", rel_display(root, path), err);
         }
