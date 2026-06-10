@@ -3,18 +3,26 @@
 [中文说明](./README.zh-CN.md)
 
 A heuristic detector for **fake lossless** audio — files transcoded from a lossy source
-(e.g. 320k MP3) and then re-wrapped as FLAC/ALAC to masquerade as lossless. Point it at one
-file for a verdict, or at a whole library for a ranked report of the suspects.
+(e.g. 320k MP3) and then re-wrapped as FLAC/ALAC to masquerade as lossless, plus **fake Hi-Res** —
+CD/lossy material upsampled into a 96/192 kHz container. Point it at one file for a verdict, or at a
+whole library for a ranked report of the suspects.
 
 - **Read-only** — it analyzes and reports; it never moves, renames, or deletes anything.
-- **Self-contained** — pure-Rust audio decoding, no system dependencies (ffmpeg etc.).
+- **Pure-Rust decoding** for FLAC, ALAC, WAV, AIFF, CAF, etc. — no system dependencies. DSD
+  (`.dsf`/`.dff`) decodes via an **optional ffmpeg fallback** (only needed if you scan DSD).
+- **Hi-Res aware** — detects upsampling, empty high-frequency bands, and spectral holes.
 - **Parallel** — a multi-thousand-file library scans in a few minutes on a modern machine.
 
 ## How it works
 
-Genuine lossless audio (e.g. 16bit/44.1kHz) carries real high-frequency energy that extends
-naturally toward ~20–22 kHz. A lossy codec applies a low-pass filter at a fixed frequency, leaving
-an **energy cliff** in the spectrum — and that cliff frequency betrays the original bitrate:
+Everything is derived from the decoded PCM — the container's claimed format, bitrate, and sample
+rate are never trusted. The tool decodes the audio (via
+[symphonia](https://github.com/pdeljanov/Symphonia); ffmpeg for DSD), runs a windowed FFT
+([rustfft](https://github.com/ejmahler/RustFFT)) across the **whole track**, averages the power
+spectrum, and runs three detectors over it.
+
+**1. High-frequency cutoff (lossy transcode).** A lossy codec low-passes at a fixed frequency,
+leaving an **energy cliff** whose location betrays the original bitrate:
 
 | Source            | Typical cutoff |
 |-------------------|----------------|
@@ -23,11 +31,19 @@ an **energy cliff** in the spectrum — and that cliff frequency betrays the ori
 | 128k transcode    | ~16 kHz        |
 | lower bitrate     | ~12–15 kHz     |
 
-The tool decodes the audio (via [symphonia](https://github.com/pdeljanov/Symphonia)), runs a
-windowed FFT ([rustfft](https://github.com/ejmahler/RustFFT)) across the **whole track**, averages
-the power spectrum, and finds the cutoff as the highest frequency whose energy still stays within
-~65 dB of the track's own spectral peak (a **peak-relative** threshold). That cutoff frequency is
-the verdict signal.
+The cutoff is the highest frequency whose energy still stays within ~65 dB of the track's own
+spectral **peak** (a **peak-relative** threshold).
+
+**2. Sample-rate authenticity (fake Hi-Res / upsampling).** For a declared Hi-Res file (> 48 kHz),
+genuine content extends well past the CD wall (~22 kHz). When the real content instead stops near
+22 kHz with an **empty band above ~26 kHz**, the file is CD/lossy material upsampled into a Hi-Res
+container — flagged 🔼 Upsampled. The reported *HF extension* metric (dB of energy above 26 kHz,
+relative to the peak) makes the gap obvious: genuine Hi-Res sits around −30 dB, an upsample sinks
+below −70 dB.
+
+**3. Spectral holes (informational).** AAC/Vorbis transcodes can leave notches below the cutoff.
+These are detected and reported, but — being false-positive-prone on real music — they **never
+change the verdict**.
 
 Two deliberate design points:
 
@@ -87,6 +103,21 @@ cargo build --release
 # binary at ./target/release/lossless-checker
 ```
 
+### Optional: DSD support
+
+DSD (`.dsf`/`.dff`) has no pure-Rust decoder, so the tool shells out to **ffmpeg** to decode it to
+PCM. Everything else works without ffmpeg. Install it only if you need to scan DSD:
+
+```bash
+# macOS
+brew install ffmpeg
+# Debian/Ubuntu
+sudo apt install ffmpeg
+```
+
+If ffmpeg is missing and you point the tool at a DSD file, it reports a clear error for that file
+and moves on — the rest of the scan is unaffected.
+
 ## Usage
 
 **Single file** — detailed verdict:
@@ -96,13 +127,31 @@ cargo run --release -- "path/to/song.flac"
 ```
 
 ```
-文件: song.flac
-采样率: 48000 Hz
-采样总数: 12582912
-奈奎斯特频率: 24000 Hz
-估计高频截止: 20795 Hz (86.6% of Nyquist)
+File: song.flac
+Format: FLAC
+Sample rate: 48000 Hz
+Total samples: 12582912
+Nyquist frequency: 24000 Hz
+Estimated HF cutoff: 20795 Hz (86.6% of Nyquist)
+Spectral holes: none significant
 
-判断: ✅ 高频延伸正常，像真无损
+Verdict: ✅ High frequencies extend naturally — looks like genuine lossless
+```
+
+A declared Hi-Res file that is really upsampled shows an extra `HF extension` line and the
+🔼 verdict:
+
+```
+File: fake96.flac
+Format: FLAC
+Sample rate: 96000 Hz
+Total samples: 288000
+Nyquist frequency: 48000 Hz
+Estimated HF cutoff: 24598 Hz (51.2% of Nyquist)
+HF extension (>26kHz): -114.3 dB (relative to spectral peak; lower = emptier highs)
+Spectral holes: none significant
+
+Verdict: 🔼 Declared as Hi-Res, but real content stops at the ~CD band — likely upsampled / lossy-sourced fake Hi-Res
 ```
 
 **Whole library** — pass a directory to scan it recursively, in parallel, and emit a ranked report:
@@ -111,36 +160,40 @@ cargo run --release -- "path/to/song.flac"
 cargo run --release -- ~/Music --report scan.txt --json scan.json
 ```
 
-The text report has a summary, an **album ranking** (by 🚩 count — a whole album cut at the same
-low frequency is the strongest signal of a lossy source), the full suspect list (🚩 then ⚠️,
+The text report has a summary, an **album ranking** (by 🚩/🔼 count — a whole album cut at the same
+low frequency is the strongest signal of a lossy source), the full flagged list (🚩/🔼 then ⚠️,
 sorted by cutoff), and a **decode-failure list** (surfaced, never silently dropped):
 
 ```
-== 汇总 ==
-  ✅ 像真无损 (≥19kHz)        2086
-  ⚠️  高频收窄 (16.5-19kHz)    515
-  🚩 高度可疑 (<16.5kHz)      185
-  ✖  解码失败                 0
+== Summary ==
+  ✅ Likely lossless (≥19kHz)     2086
+  ⚠️  Narrowed HF (16.5-19kHz)     515
+  🚩 Highly suspect (<16.5kHz)    185
+  🔼 Fake Hi-Res (upsampled)      12
+  ✖  Decode failed                0
 
-== 按专辑排行（🚩 数量降序）==
-  🚩 15  ⚠️  0  Some Artist - Debut Album (2006)
+== Albums ranked (by 🚩/🔼 count, descending) ==
+  🚩/🔼 15  ⚠️  0  Some Artist - Debut Album (2006)
   ...
 
-== 可疑文件清单（🚩 在前，各按截止频率升序）==
+== Flagged files (🚩/🔼 first, each by cutoff ascending) ==
    12672 Hz  🚩  Some Artist - Album/03. track.flac
+   24598 Hz  🔼  Some Artist - Hi-Res Album/01. track.flac
    17800 Hz  ⚠️  Other Artist - Album/05. track.flac
    ...
 ```
 
-With `--json` you also get machine-readable output:
+With `--json` you also get machine-readable output. Hi-Res files additionally carry
+`hires_ext_db`; every result carries `format_label` and a `holes` count:
 
 ```json
 {
   "root": "/Users/you/Music",
   "scanned": 2786,
-  "summary": { "clean": 2469, "narrowed": 234, "suspect": 83, "error": 0 },
+  "summary": { "clean": 2469, "narrowed": 234, "suspect": 83, "upsampled": 12, "error": 0 },
   "results": [
-    { "path": "Album/track.flac", "sample_rate": 44100, "cutoff_hz": 12672.0, "ratio": 0.5747, "verdict": "suspect" }
+    { "path": "Album/track.flac", "format_label": "FLAC", "sample_rate": 44100, "cutoff_hz": 12672.0, "ratio": 0.5747, "holes": 0, "verdict": "suspect" },
+    { "path": "HiRes/track.flac", "format_label": "FLAC", "sample_rate": 96000, "cutoff_hz": 24598.0, "ratio": 0.5125, "hires_ext_db": -114.3, "holes": 0, "verdict": "upsampled" }
   ]
 }
 ```
@@ -154,21 +207,27 @@ With `--json` you also get machine-readable output:
 | `--threshold`  | `10.0`                  | Noise-floor multiplier — only used with `--noise-floor`. |
 | `--report`     | stdout                  | Write the text report to this file (directory scan only). |
 | `--json`       | —                       | Also write a JSON report to this file (directory scan only). |
-| `--ext`        | `flac,wav,m4a,aif,aiff` | Comma-separated extensions to scan. Lossless containers only — scanning mp3 etc. is pointless for fake-lossless detection. |
+| `--ext`        | `flac,wav,m4a,aif,aiff,caf,alac,dsf,dff` | Comma-separated extensions to scan. Lossless containers + DSD only — scanning mp3 etc. is pointless for fake-lossless detection. |
 | `--jobs`       | CPU cores               | Number of parallel worker threads. |
 
 ### Verdict tiers
 
-The verdict is based on the **absolute cutoff frequency in Hz**, not a ratio of Nyquist, because
-lossy codecs low-pass at a fixed Hz regardless of the container's sample rate. A ratio-of-Nyquist
-would wrongly flag perfectly good 48 kHz files (whose real content also stops at ~21–22 kHz — only
-~88% of their 24 kHz Nyquist).
+For **CD-rate** files (≤ 48 kHz) the verdict is based on the **absolute cutoff frequency in Hz**,
+not a ratio of Nyquist, because lossy codecs low-pass at a fixed Hz regardless of the container's
+sample rate. A ratio-of-Nyquist would wrongly flag perfectly good 48 kHz files (whose real content
+also stops at ~21–22 kHz — only ~88% of their 24 kHz Nyquist).
 
 | Cutoff           | Verdict |
 |------------------|---------|
 | `≥ 19 kHz`       | ✅ Looks like real lossless |
 | `16.8 – 19 kHz`  | ⚠️ Narrowed — possible high-bitrate transcode, check manually |
 | `< 16.8 kHz`     | 🚩 Clear cliff — highly suspect fake lossless |
+
+For **Hi-Res** files (> 48 kHz) the question is instead *"does real content actually reach past the
+CD wall?"*. A file is 🔼 **Upsampled** when its real content stops below ~28 kHz **or** the band
+above 26 kHz is empty (HF extension ≪ −70 dB); otherwise it passes as ✅ Clean. This catches CD or
+lossy material upsampled into a Hi-Res container, which the absolute-Hz cutoff alone would wave
+through.
 
 ### Calibration
 
@@ -193,6 +252,12 @@ This is a **heuristic**, not proof:
   reliably (~16.5 kHz), but 320k MP3 low-passes at ~20 kHz, which overlaps where plenty of genuine
   lossless naturally rolls off. No cutoff-based metric can separate those, so a 320k transcode will
   usually read ✅. This tool catches obvious fakes, not the high-bitrate ones.
+- **Hi-Res thresholds are heuristic too.** The upsample check assumes genuine Hi-Res content
+  reaches past ~28 kHz; a legitimate master that genuinely rolls off below that (rare — usually an
+  old analog source) can read 🔼. The thresholds ship as reasoned defaults pending calibration
+  against a labelled Hi-Res fixture set.
+- **DSD needs ffmpeg** (see [above](#optional-dsd-support)); without it, DSD files are skipped with
+  an error rather than analyzed.
 - **Performance:** it decodes every track in full, so a large library takes a few minutes (it runs
   on all CPU cores). Single-file checks are near-instant.
 

@@ -3,16 +3,22 @@
 [English](./README.md)
 
 一个检测**假无损**音频的启发式工具——从有损源（如 320k MP3）转码、再重新封装成 FLAC/ALAC 来冒充
-无损的文件。可对单个文件给出判断，也可对整个音乐库批量扫描、输出排好序的可疑清单。
+无损的文件；以及**假 Hi-Res**——把 CD/有损素材上采样塞进 96/192 kHz 容器。可对单个文件给出判断，
+也可对整个音乐库批量扫描、输出排好序的可疑清单。
 
 - **严格只读**——只分析、只报告，绝不移动、改名或删除任何文件。
-- **无系统依赖**——纯 Rust 解码，不需要 ffmpeg 之类的外部依赖。
+- **纯 Rust 解码** FLAC、ALAC、WAV、AIFF、CAF 等，无系统依赖。DSD（`.dsf`/`.dff`）通过**可选的
+  ffmpeg 兜底**解码（仅在扫描 DSD 时才需要）。
+- **Hi-Res 感知**——可检测上采样、空高频段、以及频谱空洞。
 - **并行**——几千个文件的库在现代机器上几分钟即可扫完。
 
 ## 原理
 
-真正的无损音频（如 16bit/44.1kHz）的高频能量会自然延伸到接近 20–22 kHz。而有损编码器会在某个
-固定频率施加低通滤波，在频谱上留下一道**能量断崖**——断崖所在的频率就暴露了原始码率：
+一切都基于解码后的 PCM 推断——容器声称的格式、码率、采样率一律不信。工具用
+[symphonia](https://github.com/pdeljanov/Symphonia)（DSD 走 ffmpeg）解码音频，对**整首歌**做分段
+FFT（[rustfft](https://github.com/ejmahler/RustFFT)）、对功率谱取平均，再跑三个检测器。
+
+**1. 高频截止（有损转码）。** 有损编码器在固定频率施加低通，留下一道**能量断崖**，其位置暴露原始码率：
 
 | 来源              | 典型截止频率   |
 |-------------------|----------------|
@@ -21,9 +27,15 @@
 | 128k 转码         | ~16 kHz        |
 | 更低码率          | ~12–15 kHz     |
 
-工具用 [symphonia](https://github.com/pdeljanov/Symphonia) 解码音频，对**整首歌**做分段 FFT
-（[rustfft](https://github.com/ejmahler/RustFFT)）、对功率谱取平均，把截止定义为"能量仍在频谱
-自身峰值 ~65 dB 以内的最高频率"（**峰值相对**阈值）。这个截止频率就是判断依据。
+截止定义为"能量仍在频谱自身**峰值** ~65 dB 以内的最高频率"（**峰值相对**阈值）。
+
+**2. 采样率真伪（假 Hi-Res / 上采样）。** 对声称 Hi-Res（> 48 kHz）的文件，真品内容会明显延伸到
+CD 上限（~22 kHz）之上。若真实内容只到 ~22 kHz、且 **~26 kHz 以上一片空白**，那就是 CD/有损素材
+被上采样塞进 Hi-Res 容器——标记为 🔼 上采样。报告里的*高频延伸*指标（26 kHz 以上能量相对峰值的
+dB）让差距一目了然：真 Hi-Res 约在 −30 dB，上采样会跌到 −70 dB 以下。
+
+**3. 频谱空洞（仅供参考）。** AAC/Vorbis 转码可能在截止以下留下凹陷（notch）。工具会检测并报告，
+但因其在真实音乐上易误报，**不影响判定**。
 
 两个刻意的设计点：
 
@@ -84,6 +96,20 @@ cargo build --release
 # 可执行文件在 ./target/release/lossless-checker
 ```
 
+### 可选：DSD 支持
+
+DSD（`.dsf`/`.dff`）没有纯 Rust 解码器，工具会调用 **ffmpeg** 把它解到 PCM。其他格式都不需要
+ffmpeg。仅在你要扫描 DSD 时才需安装：
+
+```bash
+# macOS
+brew install ffmpeg
+# Debian/Ubuntu
+sudo apt install ffmpeg
+```
+
+若没装 ffmpeg 又指向 DSD 文件，工具会对该文件报一个清晰的错误并跳过，不影响整次扫描的其余部分。
+
 ## 使用
 
 **单文件** —— 输出详细判断：
@@ -92,14 +118,33 @@ cargo build --release
 cargo run --release -- "path/to/song.flac"
 ```
 
-```
-文件: song.flac
-采样率: 48000 Hz
-采样总数: 12582912
-奈奎斯特频率: 24000 Hz
-估计高频截止: 20795 Hz (86.6% of Nyquist)
+> 注：程序输出为英文。
 
-判断: ✅ 高频延伸正常，像真无损
+```
+File: song.flac
+Format: FLAC
+Sample rate: 48000 Hz
+Total samples: 12582912
+Nyquist frequency: 24000 Hz
+Estimated HF cutoff: 20795 Hz (86.6% of Nyquist)
+Spectral holes: none significant
+
+Verdict: ✅ High frequencies extend naturally — looks like genuine lossless
+```
+
+声称 Hi-Res 但实为上采样的文件会多出一行 `HF extension` 并给出 🔼 判定：
+
+```
+File: fake96.flac
+Format: FLAC
+Sample rate: 96000 Hz
+Total samples: 288000
+Nyquist frequency: 48000 Hz
+Estimated HF cutoff: 24598 Hz (51.2% of Nyquist)
+HF extension (>26kHz): -114.3 dB (relative to spectral peak; lower = emptier highs)
+Spectral holes: none significant
+
+Verdict: 🔼 Declared as Hi-Res, but real content stops at the ~CD band — likely upsampled / lossy-sourced fake Hi-Res
 ```
 
 **整库批量** —— 传一个目录即可递归、并行扫描，输出排好序的报告：
@@ -108,35 +153,39 @@ cargo run --release -- "path/to/song.flac"
 cargo run --release -- ~/Music --report scan.txt --json scan.json
 ```
 
-文本报告含：汇总、**按专辑排行**（🚩 数量降序——整张专辑同档位低截止＝来源八成有损，这是最强
-信号）、完整可疑清单（🚩 在前、按截止频率升序），以及**解码失败清单**（显式列出，绝不静默跳过）：
+文本报告含：汇总、**按专辑排行**（🚩/🔼 数量降序——整张专辑同档位低截止＝来源八成有损，这是最强
+信号）、完整可疑清单（🚩/🔼 在前、按截止频率升序），以及**解码失败清单**（显式列出，绝不静默跳过）：
 
 ```
-== 汇总 ==
-  ✅ 像真无损 (≥19kHz)        2086
-  ⚠️  高频收窄 (16.5-19kHz)    515
-  🚩 高度可疑 (<16.5kHz)      185
-  ✖  解码失败                 0
+== Summary ==
+  ✅ Likely lossless (≥19kHz)     2086
+  ⚠️  Narrowed HF (16.5-19kHz)     515
+  🚩 Highly suspect (<16.5kHz)    185
+  🔼 Fake Hi-Res (upsampled)      12
+  ✖  Decode failed                0
 
-== 按专辑排行（🚩 数量降序）==
-  🚩 15  ⚠️  0  Some Artist - Debut Album (2006)
+== Albums ranked (by 🚩/🔼 count, descending) ==
+  🚩/🔼 15  ⚠️  0  Some Artist - Debut Album (2006)
   ...
 
-== 可疑文件清单（🚩 在前，各按截止频率升序）==
+== Flagged files (🚩/🔼 first, each by cutoff ascending) ==
    12672 Hz  🚩  Some Artist - Album/03. track.flac
+   24598 Hz  🔼  Some Artist - Hi-Res Album/01. track.flac
    17800 Hz  ⚠️  Other Artist - Album/05. track.flac
    ...
 ```
 
-加 `--json` 还能得到机器可读的输出：
+加 `--json` 还能得到机器可读的输出。Hi-Res 文件会额外带 `hires_ext_db`；每条结果都带
+`format_label` 和 `holes` 计数：
 
 ```json
 {
   "root": "/Users/you/Music",
   "scanned": 2786,
-  "summary": { "clean": 2469, "narrowed": 234, "suspect": 83, "error": 0 },
+  "summary": { "clean": 2469, "narrowed": 234, "suspect": 83, "upsampled": 12, "error": 0 },
   "results": [
-    { "path": "Album/track.flac", "sample_rate": 44100, "cutoff_hz": 12672.0, "ratio": 0.5747, "verdict": "suspect" }
+    { "path": "Album/track.flac", "format_label": "FLAC", "sample_rate": 44100, "cutoff_hz": 12672.0, "ratio": 0.5747, "holes": 0, "verdict": "suspect" },
+    { "path": "HiRes/track.flac", "format_label": "FLAC", "sample_rate": 96000, "cutoff_hz": 24598.0, "ratio": 0.5125, "hires_ext_db": -114.3, "holes": 0, "verdict": "upsampled" }
   ]
 }
 ```
@@ -150,20 +199,24 @@ cargo run --release -- ~/Music --report scan.txt --json scan.json
 | `--threshold`  | `10.0`                  | 底噪倍数——仅在 `--noise-floor` 时生效。 |
 | `--report`     | stdout                  | 把文本报告写到此文件（仅目录扫描）。 |
 | `--json`       | —                       | 额外把 JSON 报告写到此文件（仅目录扫描）。 |
-| `--ext`        | `flac,wav,m4a,aif,aiff` | 逗号分隔的扫描扩展名。只扫无损容器——扫 mp3 等本身有损的格式对检测假无损没有意义。 |
+| `--ext`        | `flac,wav,m4a,aif,aiff,caf,alac,dsf,dff` | 逗号分隔的扫描扩展名。只扫无损容器 + DSD——扫 mp3 等本身有损的格式对检测假无损没有意义。 |
 | `--jobs`       | CPU 核数                | 并行线程数。 |
 
 ### 判定区间
 
-判定基于**绝对截止频率（Hz）**，而非"占奈奎斯特的比例"。因为有损编码器的低通截止是固定 Hz，
-与容器采样率无关。若用比例会冤枉 48 kHz 文件——它们的真实内容同样只到 ~21–22 kHz，比例只有
-~88%，却被误判为可疑。
+对 **CD 采样率**（≤ 48 kHz）的文件，判定基于**绝对截止频率（Hz）**，而非"占奈奎斯特的比例"。因为
+有损编码器的低通截止是固定 Hz，与容器采样率无关。若用比例会冤枉 48 kHz 文件——它们的真实内容同样
+只到 ~21–22 kHz，比例只有 ~88%，却被误判为可疑。
 
 | 截止频率           | 判断 |
 |--------------------|------|
 | `≥ 19 kHz`         | ✅ 高频延伸正常，像真无损 |
 | `16.8 – 19 kHz`    | ⚠️ 高频收窄，可能是高码率有损转码，建议人工复核 |
 | `< 16.8 kHz`       | 🚩 明显断崖，高度疑似假无损 |
+
+对 **Hi-Res**（> 48 kHz）的文件，问题变成"真实内容是否真的延伸过了 CD 上限"。当真实内容止于
+~28 kHz 以下，**或** 26 kHz 以上一片空白（高频延伸 ≪ −70 dB），即判为 🔼 **上采样**；否则通过为
+✅。这正好揪出把 CD 或有损素材上采样塞进 Hi-Res 容器的文件——单凭绝对 Hz 截止会把它们放过。
 
 ### 校准
 
@@ -184,6 +237,10 @@ cargo run --release -- ~/Music --report scan.txt --json scan.json
 - **漏报——320k 是盲区。** 回转测试显示 128k 假无损能稳定揪出（~16.5 kHz），但 320k MP3 截止在
   ~20 kHz，正好和大量真无损的自然滚降重叠。任何基于截止频率的指标都无法区分，所以 320k 转码通常
   会读成 ✅。本工具揪的是明显的假，不是高码率的那种。
+- **Hi-Res 阈值同样是启发式。** 上采样检测假设真 Hi-Res 内容会延伸过 ~28 kHz；个别真品母带若本身
+  就滚降到该频率以下（少见，多为老的模拟源）可能被读成 🔼。这些阈值目前是经过推理的默认值，待用
+  带标注的 Hi-Res 样本集进一步校准。
+- **DSD 需要 ffmpeg**（见[上文](#可选dsd-支持)）；没有它时 DSD 文件会被报错跳过而不参与分析。
 - **性能：** 它会完整解码每一首，所以大库要跑几分钟（已用满所有 CPU 核）；单文件检查近乎瞬时。
 
 它的价值在于**从大库里批量揪出高度可疑的文件**。对被标记的文件，建议用 [Spek](https://www.spek.cc/)
