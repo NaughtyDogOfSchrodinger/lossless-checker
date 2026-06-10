@@ -118,6 +118,11 @@ sudo apt install ffmpeg
 If ffmpeg is missing and you point the tool at a DSD file, it reports a clear error for that file
 and moves on — the rest of the scan is unaffected.
 
+DSD is judged on its **audible band only**: its ultrasonic region is noise-shaping noise (not
+signal) and what survives decoding depends on the decimation filter, so the Hi-Res upsample check
+is *not* applied to DSD (doing so would false-positive on every DSD). A DSD genuinely sourced from a
+low-bitrate lossy master is still caught via its audible cutoff (🚩 below 16.5 kHz).
+
 ## Usage
 
 > Logs and reports default to **Chinese**. Pass `--lang en` for English (as shown in the examples

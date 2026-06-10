@@ -29,6 +29,10 @@ pub struct DecodedAudio {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
     pub format_label: String,
+    /// True when this came from DSD via the ffmpeg fallback. DSD's ultrasonic region is
+    /// noise-shaping noise, not signal, and what we observe is shaped by the decode filter —
+    /// so the hi-res upsample check must NOT be applied to it (see `verdict::classify`).
+    pub is_dsd: bool,
 }
 
 /// Decode an audio file to mono f32 PCM. Dispatches DSD to the ffmpeg fallback.
@@ -119,6 +123,7 @@ fn decode_symphonia(path: &Path, lang: Lang) -> Result<DecodedAudio, String> {
         samples: mix_to_mono(samples, channels),
         sample_rate,
         format_label,
+        is_dsd: false,
     })
 }
 
@@ -172,6 +177,7 @@ fn decode_dsd_ffmpeg(path: &Path, lang: Lang) -> Result<DecodedAudio, String> {
         samples,
         sample_rate: DSD_PCM_RATE,
         format_label: "DSD (via ffmpeg)".to_string(),
+        is_dsd: true,
     })
 }
 

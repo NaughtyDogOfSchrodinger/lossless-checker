@@ -104,10 +104,11 @@ fn main() {
 }
 
 /// Build the detection options from CLI knobs.
-fn opts(threshold: f64, peak_db: Option<f64>) -> SpectrumOpts {
+fn opts(threshold: f64, peak_db: Option<f64>, is_dsd: bool) -> SpectrumOpts {
     SpectrumOpts {
         peak_db,
         threshold_mult: threshold,
+        is_dsd,
     }
 }
 
@@ -126,14 +127,18 @@ fn run_single(path: &Path, threshold: f64, peak_db: Option<f64>, lang: Lang) {
         exit(1);
     }
 
-    let features = spectrum::analyze(&decoded.samples, decoded.sample_rate, opts(threshold, peak_db));
+    let features = spectrum::analyze(
+        &decoded.samples,
+        decoded.sample_rate,
+        opts(threshold, peak_db, decoded.is_dsd),
+    );
     let nyquist = decoded.sample_rate as f32 / 2.0;
     let ratio = if nyquist > 0.0 {
         features.cutoff_hz / nyquist
     } else {
         0.0
     };
-    let verdict = classify(&features, decoded.sample_rate);
+    let verdict = classify(&features, decoded.sample_rate, decoded.is_dsd);
 
     println!("{}: {}", lang.pick("文件", "File"), path.display());
     println!("{}: {}", lang.pick("格式", "Format"), decoded.format_label);
@@ -151,6 +156,15 @@ fn run_single(path: &Path, threshold: f64, peak_db: Option<f64>, lang: Lang) {
             "{}: {db:.1} dB ({})",
             lang.pick("高频延伸(>26kHz)", "HF extension (>26kHz)"),
             lang.pick("相对频谱峰值；越低代表高频越空", "relative to spectral peak; lower = emptier highs")
+        );
+    }
+    if decoded.is_dsd {
+        println!(
+            "{}",
+            lang.pick(
+                "（DSD：超声区为噪声整形噪声，仅按可听频段判定，不做上采样判断）",
+                "(DSD: the ultrasonic region is noise-shaping noise; judged on the audible band only, no upsample check)"
+            )
         );
     }
     if features.holes.is_empty() {
@@ -312,8 +326,11 @@ fn analyze_file(path: &Path, threshold: f64, peak_db: Option<f64>, lang: Lang) -
         if decoded.samples.is_empty() {
             return Err(lang.pick("没有解码出任何采样", "no samples were decoded").to_string());
         }
-        let features =
-            spectrum::analyze(&decoded.samples, decoded.sample_rate, opts(threshold, peak_db));
+        let features = spectrum::analyze(
+            &decoded.samples,
+            decoded.sample_rate,
+            opts(threshold, peak_db, decoded.is_dsd),
+        );
         let nyquist = decoded.sample_rate as f32 / 2.0;
         Ok(Analysis {
             sample_rate: decoded.sample_rate,
@@ -326,7 +343,7 @@ fn analyze_file(path: &Path, threshold: f64, peak_db: Option<f64>, lang: Lang) -
             },
             hole_count: features.holes.len(),
             hires_ext_db: features.hires_ext_db,
-            verdict: classify(&features, decoded.sample_rate),
+            verdict: classify(&features, decoded.sample_rate, decoded.is_dsd),
         })
     })();
     Outcome {
