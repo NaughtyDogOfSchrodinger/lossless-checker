@@ -38,7 +38,49 @@ Two deliberate design points:
 - **Whole-track analysis.** Many songs open with a quiet intro and only bring in cymbals/percussion
   later, so sampling just the head would underestimate the cutoff and cause false positives.
 
+## Install
+
+Grab a prebuilt binary from the [latest release](https://github.com/NaughtyDogOfSchrodinger/lossless-checker/releases/latest) — no toolchain required. Pick the asset for your platform:
+
+| Platform                 | Asset                                                  |
+|--------------------------|--------------------------------------------------------|
+| macOS (Apple Silicon)    | `lossless-checker-<ver>-aarch64-apple-darwin.tar.gz`   |
+| macOS (Intel)            | `lossless-checker-<ver>-x86_64-apple-darwin.tar.gz`    |
+| Linux (most distros)     | `lossless-checker-<ver>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux (static / musl)    | `lossless-checker-<ver>-x86_64-unknown-linux-musl.tar.gz` |
+| Windows (x64)            | `lossless-checker-<ver>-x86_64-pc-windows-msvc.zip`    |
+
+**macOS / Linux:**
+
+```bash
+tar xzf lossless-checker-*.tar.gz
+cd lossless-checker-*/
+./lossless-checker "path/to/song.flac"
+```
+
+On macOS, Gatekeeper quarantines binaries downloaded from the web. If you see *"cannot be opened because the developer cannot be verified"*, clear the quarantine flag once:
+
+```bash
+xattr -d com.apple.quarantine ./lossless-checker
+```
+
+To run it from anywhere, move it onto your `PATH`, e.g. `sudo mv lossless-checker /usr/local/bin/`.
+
+**Windows:**
+
+Unzip the archive and run `lossless-checker.exe` from PowerShell or `cmd`:
+
+```powershell
+.\lossless-checker.exe "path\to\song.flac"
+```
+
+If SmartScreen warns about an unrecognized app, choose **More info → Run anyway**.
+
+> The `<ver>` placeholder matches the release tag, e.g. `v0.1.0`. In the [Usage](#usage) examples below, substitute the binary path (`./lossless-checker`) wherever a command shows `cargo run --release --`.
+
 ## Build
+
+To build from source instead (requires a [Rust toolchain](https://rustup.rs/)):
 
 ```bash
 cargo build --release

@@ -33,7 +33,51 @@
 - **分析整首。** 很多歌以安静的前奏开场，镲片/打击乐等高频要到后面才进来，只取开头会低估截止、
   造成误报。
 
+## 安装
+
+从[最新发布](https://github.com/NaughtyDogOfSchrodinger/lossless-checker/releases/latest)下载预编译的二进制即可，无需安装工具链。按平台选择对应文件：
+
+| 平台                     | 文件                                                   |
+|--------------------------|--------------------------------------------------------|
+| macOS（Apple 芯片）      | `lossless-checker-<版本>-aarch64-apple-darwin.tar.gz`  |
+| macOS（Intel）           | `lossless-checker-<版本>-x86_64-apple-darwin.tar.gz`   |
+| Linux（多数发行版）      | `lossless-checker-<版本>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux（静态 / musl）     | `lossless-checker-<版本>-x86_64-unknown-linux-musl.tar.gz` |
+| Windows（x64）           | `lossless-checker-<版本>-x86_64-pc-windows-msvc.zip`   |
+
+**macOS / Linux：**
+
+```bash
+tar xzf lossless-checker-*.tar.gz
+cd lossless-checker-*/
+./lossless-checker "path/to/song.flac"
+```
+
+在 macOS 上，从网络下载的二进制会被 Gatekeeper 隔离。若提示*"无法打开，因为无法验证开发者"*，
+执行一次以下命令清除隔离标记：
+
+```bash
+xattr -d com.apple.quarantine ./lossless-checker
+```
+
+想在任意目录运行，把它移到 `PATH` 上，例如 `sudo mv lossless-checker /usr/local/bin/`。
+
+**Windows：**
+
+解压后在 PowerShell 或 `cmd` 里运行 `lossless-checker.exe`：
+
+```powershell
+.\lossless-checker.exe "path\to\song.flac"
+```
+
+若 SmartScreen 提示应用无法识别，点**更多信息 → 仍要运行**。
+
+> `<版本>` 占位符对应发布标签，如 `v0.1.0`。下面[使用](#使用)示例里凡是写 `cargo run --release --`
+> 的地方，都可替换成二进制路径（`./lossless-checker`）。
+
 ## 构建
+
+若想从源码构建（需要 [Rust 工具链](https://rustup.rs/)）：
 
 ```bash
 cargo build --release
