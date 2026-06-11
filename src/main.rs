@@ -90,6 +90,16 @@ fn main() {
     let peak_db = if cli.noise_floor { None } else { Some(cli.peak_db) };
 
     if cli.path.is_file() {
+        // --report / --json only apply to directory scans; warn rather than silently drop them.
+        if cli.report.is_some() || cli.json.is_some() {
+            eprintln!(
+                "{}",
+                cli.lang.pick(
+                    "提示：--report / --json 仅用于目录扫描，单文件模式下已忽略。",
+                    "Note: --report / --json apply to directory scans only; ignored in single-file mode."
+                )
+            );
+        }
         run_single(&cli.path, cli.threshold, peak_db, cli.lang);
     } else if cli.path.is_dir() {
         run_batch(&cli);

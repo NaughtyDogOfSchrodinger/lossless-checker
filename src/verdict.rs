@@ -88,7 +88,8 @@ pub struct Analysis {
 /// genuinely sourced from a low-bitrate lossy master (audible cutoff < 16.5 kHz).
 pub fn classify(f: &SpectralFeatures, sample_rate: u32, is_dsd: bool) -> Verdict {
     if sample_rate > 48_000 && !is_dsd {
-        let empty = f.hires_ext_db.is_none_or(|db| db < HIRES_EMPTY_DB);
+        // `map_or(true, …)` instead of `is_none_or` so the crate builds on Rust < 1.82.
+        let empty = f.hires_ext_db.map_or(true, |db| db < HIRES_EMPTY_DB);
         if f.cutoff_hz < HIRES_MIN_EXT || empty {
             return Verdict::Upsampled;
         }
