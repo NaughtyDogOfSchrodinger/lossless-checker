@@ -5,7 +5,7 @@
 //! energy lives well above the CD Nyquist — the empty-HF / fake-hi-res signal), and
 //! `detect_holes` (AAC/Vorbis-style notches below the cutoff; report-only).
 
-use rustfft::{num_complex::Complex, FftPlanner};
+use realfft::RealFftPlanner;
 
 /// FFT window size. Frequency resolution = sample_rate / FFT_SIZE (~5-6 Hz/bin @44.1k).
 const FFT_SIZE: usize = 8192;
@@ -98,8 +98,11 @@ pub fn analyze(samples: &[f32], sample_rate: u32, opts: SpectrumOpts) -> Spectra
 /// just the intro underestimates the cutoff and produces false positives. Throughput comes
 /// from parallelism across files instead.
 fn avg_power_spectrum(samples: &[f32]) -> (Vec<f64>, u64) {
-    let mut planner = FftPlanner::<f32>::new();
+    let mut planner = RealFftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(FFT_SIZE);
+    // Reusable scratch buffers: real-to-complex emits FFT_SIZE/2 + 1 bins.
+    let mut input = fft.make_input_vec();
+    let mut spectrum = fft.make_output_vec();
 
     let mut energy = vec![0.0f64; FFT_SIZE / 2];
     let mut window_count = 0u64;
@@ -110,15 +113,14 @@ fn avg_power_spectrum(samples: &[f32]) -> (Vec<f64>, u64) {
     let hop = FFT_SIZE; // no overlap; good enough and fast
     let mut pos = 0;
     while pos + FFT_SIZE <= samples.len() {
-        let mut buffer: Vec<Complex<f32>> = samples[pos..pos + FFT_SIZE]
-            .iter()
-            .enumerate()
-            .map(|(i, &s)| Complex::new(s * window[i], 0.0))
-            .collect();
+        for (dst, (&s, &w)) in input.iter_mut().zip(samples[pos..pos + FFT_SIZE].iter().zip(&window))
+        {
+            *dst = s * w;
+        }
 
-        fft.process(&mut buffer);
+        fft.process(&mut input, &mut spectrum).expect("FFT input/output sizes match");
 
-        for (i, c) in buffer.iter().take(FFT_SIZE / 2).enumerate() {
+        for (i, c) in spectrum.iter().take(FFT_SIZE / 2).enumerate() {
             energy[i] += c.norm_sqr() as f64;
         }
         window_count += 1;
