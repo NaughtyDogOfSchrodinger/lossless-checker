@@ -16,7 +16,9 @@
 
 一切都基于解码后的 PCM 推断——容器声称的格式、码率、采样率一律不信。工具用
 [symphonia](https://github.com/pdeljanov/Symphonia)（DSD 走 ffmpeg）解码音频，对**整首歌**做分段
-FFT（[rustfft](https://github.com/ejmahler/RustFFT)）、对功率谱取平均，再跑三个检测器。
+加窗 FFT（[rustfft](https://github.com/ejmahler/RustFFT)，采用 Blackman-Harris 窗）、对功率谱取
+平均，再跑三个检测器。Blackman-Harris 窗的旁瓣极低（约 −92 dB），可避免低频能量泄漏上溢、掩盖有损
+截止断崖。
 
 **1. 高频截止（有损转码）。** 有损编码器在固定频率施加低通，留下一道**能量断崖**，其位置暴露原始码率：
 

@@ -17,9 +17,11 @@ whole library for a ranked report of the suspects.
 
 Everything is derived from the decoded PCM — the container's claimed format, bitrate, and sample
 rate are never trusted. The tool decodes the audio (via
-[symphonia](https://github.com/pdeljanov/Symphonia); ffmpeg for DSD), runs a windowed FFT
-([rustfft](https://github.com/ejmahler/RustFFT)) across the **whole track**, averages the power
-spectrum, and runs three detectors over it.
+[symphonia](https://github.com/pdeljanov/Symphonia); ffmpeg for DSD), runs a
+Blackman-Harris-windowed FFT ([rustfft](https://github.com/ejmahler/RustFFT)) across the
+**whole track**, averages the power spectrum, and runs three detectors over it. The
+Blackman-Harris window's low sidelobes (~−92 dB) keep low-band energy from leaking up and
+masking the lossy cutoff cliff.
 
 **1. High-frequency cutoff (lossy transcode).** A lossy codec low-passes at a fixed frequency,
 leaving an **energy cliff** whose location betrays the original bitrate:
