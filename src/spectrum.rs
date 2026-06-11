@@ -104,17 +104,16 @@ fn avg_power_spectrum(samples: &[f32]) -> (Vec<f64>, u64) {
     let mut energy = vec![0.0f64; FFT_SIZE / 2];
     let mut window_count = 0u64;
 
+    // Precompute the window once; the hot loop is just a table lookup per sample.
+    let window = blackman_harris(FFT_SIZE);
+
     let hop = FFT_SIZE; // no overlap; good enough and fast
     let mut pos = 0;
     while pos + FFT_SIZE <= samples.len() {
         let mut buffer: Vec<Complex<f32>> = samples[pos..pos + FFT_SIZE]
             .iter()
             .enumerate()
-            .map(|(i, &s)| {
-                // Hann window to reduce spectral leakage.
-                let w = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / FFT_SIZE as f32).cos();
-                Complex::new(s * w, 0.0)
-            })
+            .map(|(i, &s)| Complex::new(s * window[i], 0.0))
             .collect();
 
         fft.process(&mut buffer);
@@ -132,6 +131,23 @@ fn avg_power_spectrum(samples: &[f32]) -> (Vec<f64>, u64) {
         }
     }
     (energy, window_count)
+}
+
+/// 4-term Blackman-Harris window of length `n` (periodic form, divisor `n`).
+/// Sidelobes ~-92 dB vs Hann's ~-31 dB — keeps low-band leakage from masking the
+/// lossy-cutoff cliff in the high-frequency region.
+fn blackman_harris(n: usize) -> Vec<f32> {
+    use std::f32::consts::PI;
+    const A0: f32 = 0.35875;
+    const A1: f32 = 0.48829;
+    const A2: f32 = 0.14128;
+    const A3: f32 = 0.01168;
+    (0..n)
+        .map(|i| {
+            let t = 2.0 * PI * i as f32 / n as f32;
+            A0 - A1 * t.cos() + A2 * (2.0 * t).cos() - A3 * (3.0 * t).cos()
+        })
+        .collect()
 }
 
 /// Small centered moving average over the power spectrum.
@@ -281,5 +297,62 @@ fn push_hole(holes: &mut Vec<Hole>, start_bin: usize, end_bin: usize, depth_db: 
             high_hz,
             depth_db,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blackman_harris_endpoint_and_symmetry() {
+        let w = blackman_harris(FFT_SIZE);
+        // i=0: A0 - A1 + A2 - A3 ≈ 0.00006.
+        assert!((w[0] - 0.00006).abs() < 1e-4, "endpoint = {}", w[0]);
+        // Periodic window is even about index 0: w[i] == w[n-i].
+        for i in 1..FFT_SIZE / 2 {
+            assert!(
+                (w[i] - w[FFT_SIZE - i]).abs() < 1e-6,
+                "asymmetry at {i}: {} vs {}",
+                w[i],
+                w[FFT_SIZE - i]
+            );
+        }
+    }
+
+    /// Sum of dense tones up to `cut_hz` and nothing above => the detector should place the
+    /// cutoff near `cut_hz`, well below Nyquist. Guards against a coefficient/sign typo.
+    #[test]
+    fn detects_brickwall_cutoff() {
+        const SR: u32 = 44_100;
+        const CUT_HZ: f32 = 16_000.0;
+        let n = FFT_SIZE * 12;
+        let mut samples = vec![0.0f32; n];
+        let mut f = 100.0;
+        while f < CUT_HZ {
+            let step = 2.0 * std::f32::consts::PI * f / SR as f32;
+            for (i, s) in samples.iter_mut().enumerate() {
+                *s += (i as f32 * step).sin();
+            }
+            f += 100.0;
+        }
+        let peak = samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+        for s in samples.iter_mut() {
+            *s /= peak;
+        }
+
+        let feat = analyze(
+            &samples,
+            SR,
+            SpectrumOpts { peak_db: Some(40.0), threshold_mult: 10.0, is_dsd: false },
+        );
+
+        let nyquist = SR as f32 / 2.0;
+        assert!(feat.cutoff_hz < nyquist - 2_000.0, "cutoff not detected: {}", feat.cutoff_hz);
+        assert!(
+            (feat.cutoff_hz - CUT_HZ).abs() < 2_000.0,
+            "cutoff off target: {} (want ~{CUT_HZ})",
+            feat.cutoff_hz
+        );
     }
 }
