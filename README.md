@@ -252,7 +252,19 @@ original bitrate:
 
 ## Limitations
 
-This is a **heuristic**, not proof:
+This is a **heuristic**, not proof. The 320k blind spot below is the clearest example — here is a
+genuine lossless track next to a 320k MP3 transcode, both 48 kHz, viewed in Spek:
+
+| Genuine lossless | 320k MP3 transcode |
+|------------------|--------------------|
+| ![Genuine lossless spectrogram — energy extends naturally to the top](docs/images/spectrogram-genuine-lossless.png) | ![320k transcode spectrogram — hard low-pass wall near 20 kHz](docs/images/spectrogram-fake-320k.png) |
+
+The genuine file's energy extends naturally toward the top; the 320k transcode has a hard low-pass
+**wall near ~20 kHz**. A human eye spots the wall instantly, but it sits right where plenty of real
+lossless rolls off, so the cutoff metric can't separate them and reads the fake as ✅ — exactly why
+you should eyeball suspect files in Spek.
+
+The full set of caveats:
 
 - **False positives:** classical, acoustic, vocal, ambient, and old recordings naturally have
   little high-frequency energy and may show up as ⚠️ or 🚩. Interludes, skits, and solo-piano
