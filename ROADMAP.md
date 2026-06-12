@@ -77,6 +77,12 @@ approach here.
   the `cd_wall` step detector; a confidence score beyond the binary Pass/Suspicious. Thresholds and
   method live in [`docs/calibration.md`](docs/calibration.md). (DSD is now analyzed entirely
   natively from the 1-bit stream — the old ffmpeg decode path has been removed.)
+- **DSD per-file FFT parallelism — done.** Each file's whole FFT frames are now transformed in
+  parallel across CPU cores (`src/dsd/welch.rs` worker pool + batched `accumulate`), bit-for-bit
+  identical to the old single-threaded sweep (~3.8× faster single-file). Frame *decimation* was
+  evaluated and rejected: subsampling perturbs the calibrated narrow-band detectors (`cd_wall` /
+  baseband cutoff at ~22 kHz) and drifts DSD128 slope. FFT work is O(total samples), so within-file
+  parallelism is the only lossless speedup left.
 - **Optional DSD→PCM decimation.** If a future feature needs DSD as PCM (e.g. to run the PCM
   detectors on it), reuse the `src/dsd/` container readers plus a decimating low-pass to ~88.2 kHz —
   still no external dependency.
