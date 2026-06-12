@@ -10,6 +10,16 @@ const BASEBAND_PEAK_DB: f64 = 65.0;
 const CD_WALL_GAP_HZ: f64 = 500.0;
 const CD_WALL_SPAN_HZ: f64 = 2_000.0;
 
+/// Baseband-cutoff "music reaches the edge" gate. A real lossy/CD cutoff is an *edge*: full-band
+/// music right up to it, then a drop. A genuine dark or quiet passage instead tapers gradually and
+/// merely crosses the -65 dB line low in the band, the energy already far below the peak by then.
+/// Require the `CUTOFF_EDGE_SPAN_HZ`-wide band just below the cutoff to stay within
+/// `CUTOFF_EDGE_FLOOR_DB` of the baseband peak; otherwise it is natural roll-off, not a cliff.
+/// Cross-validated against ffmpeg PCM decodes: genuine dark DSD masters sit ≤ -61 dB there, real
+/// brick walls ≥ -40 dB.
+const CUTOFF_EDGE_FLOOR_DB: f64 = 50.0;
+const CUTOFF_EDGE_SPAN_HZ: f64 = 2_000.0;
+
 /// An averaged power spectrum: linear power per FFT bin, with the bin→Hz mapping.
 pub struct PowerSpectrum {
     /// Linear (mean) power per bin, index 0 = DC. Length = fft_size/2.
@@ -108,12 +118,18 @@ pub fn detect_baseband_cutoff(ps: &PowerSpectrum, max_hz: f64) -> Option<f64> {
         }
     }
     let cutoff = ps.freq(cutoff_bin);
-    // Only a genuine cliff counts: energy must die well before the band ceiling.
-    if cutoff < max_hz - 2.0 * ps.bin_hz {
-        Some(cutoff)
-    } else {
-        None
+    // Energy must die well before the band ceiling — otherwise it reaches the top, no cutoff.
+    if cutoff >= max_hz - 2.0 * ps.bin_hz {
+        return None;
     }
+    // ...and the music must actually reach the cutoff (an edge), not have already faded into it (a
+    // gradual dark/quiet roll-off). The band just below must stay within CUTOFF_EDGE_FLOOR_DB of the
+    // baseband peak; a gradual taper that merely crosses -65 dB low in the band does not count.
+    let edge = mean_power_band(ps, cutoff - CUTOFF_EDGE_SPAN_HZ, cutoff);
+    if edge < peak * 10f64.powf(-CUTOFF_EDGE_FLOOR_DB / 10.0) {
+        return None;
+    }
+    Some(cutoff)
 }
 
 /// Mean linear power over the bins whose center frequency falls in `[lo, hi]`.
@@ -246,5 +262,33 @@ mod tests {
         // past `floor_db` from the peak, so a noise-vs-noise step does not count.
         let ps = wall_spectrum(15_000.0, -30.0, -90.0);
         assert!(!detect_cd_wall(&ps, 22_050.0, 20.0, 50.0));
+    }
+
+    /// A real brick wall (full music to the cutoff, then a deep floor) is reported: the band just
+    /// below the cutoff still carries music, so the "music reaches the edge" gate passes.
+    #[test]
+    fn baseband_cutoff_reports_brick_wall() {
+        let ps = wall_spectrum(16_000.0, -12.0, -90.0);
+        let co = detect_baseband_cutoff(&ps, 24_000.0).expect("brick wall should be detected");
+        assert!((co - 16_000.0).abs() < 200.0, "cutoff = {co}");
+    }
+
+    /// A gradual dark/quiet roll-off (energy already ~ -60 dB by the time it crosses -65 dB) must
+    /// NOT be reported — it is natural master roll-off, not a lossy/CD cliff. This is the genuine
+    /// dark-DSD false-positive case (e.g. a soft classical-guitar passage) the gate fixes.
+    #[test]
+    fn baseband_cutoff_ignores_gradual_dark_rolloff() {
+        let bin_hz = 2_822_400.0 / 65_536.0;
+        let half = 65_536 / 2;
+        // dB(f) declines linearly from 0 dB at DC to -90 dB at 12 kHz — crosses -65 dB near 8.7 kHz,
+        // with the 2 kHz below it already around -55..-65 dB (well past the -50 dB edge floor).
+        let mut power = vec![0.0f64; half];
+        for (i, p) in power.iter_mut().enumerate() {
+            let f = i as f64 * bin_hz;
+            let db = (-90.0 / 12_000.0) * f; // -7.5 dB per kHz
+            *p = 10f64.powf(db / 10.0);
+        }
+        let ps = PowerSpectrum { power, bin_hz };
+        assert_eq!(detect_baseband_cutoff(&ps, 24_000.0), None);
     }
 }
