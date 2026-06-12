@@ -280,9 +280,14 @@ Each file is judged **Pass** / **Suspicious** / **Unsupported** from three metri
 slope (dB/oct), ultrasonic energy ratio (>50 kHz), and baseband cutoff (≤24 kHz only, so a DXD
 workflow's 176 kHz corner is never mistaken for a CD wall). The **slope is primary** and gates how
 the cutoff is read: when it confirms genuine SDM, a baseband cutoff is taken as natural master
-roll-off and only a sharp ~22.05 kHz CD wall or a hard low cliff (<16.5 kHz) still convicts — a 2020
-vocal/acoustic master rolling off at ~19 kHz is *not* flagged. Only when the slope is flat does a
-mid-band cutoff count as corroborating evidence of a PCM/lossy source.
+roll-off and only a hard low cliff (<16.5 kHz) still convicts — a 2020 vocal/acoustic master rolling
+off at ~19 kHz is *not* flagged. Only when the slope is flat does a mid-band cutoff count as
+corroborating evidence of a PCM/lossy source.
+
+Separately, a **sharp brick-wall step right at 22.05 kHz** (a `cd_wall` flag) convicts even with a
+genuine slope: it is the digital-ADC fingerprint that survives a CD→DSD re-modulation, distinct from
+a gentle analog roll-off. (In testing this flagged a 1993 CD-era album whose DSD reissue carries an
+album-wide 22.05 kHz wall, while a 1977 analog-master DSD and a 2020 native DSD show no such step.)
 
 ```
 == Summary ==

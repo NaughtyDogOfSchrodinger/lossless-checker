@@ -11,7 +11,9 @@ use serde::Serialize;
 use crate::dsd::dff::DffReader;
 use crate::dsd::dsf::DsfReader;
 use crate::dsd::judge::{judge, DsdThresholds, DsdVerdict, VerdictStatus};
-use crate::dsd::metrics::{detect_baseband_cutoff, hf_energy_ratio, noise_shaping_slope, PowerSpectrum};
+use crate::dsd::metrics::{
+    detect_baseband_cutoff, detect_cd_wall, hf_energy_ratio, noise_shaping_slope, PowerSpectrum,
+};
 use crate::dsd::unpack::unpack_block;
 use crate::dsd::welch::WelchPlan;
 use crate::dsd::{DsdContainer, DsdError, DsdMeta, DsdStream};
@@ -238,7 +240,8 @@ fn analyze_stream(
     let slope = noise_shaping_slope(&ps, th.slope_fit_lo_hz, th.slope_fit_hi_hz);
     let hf_ratio = hf_energy_ratio(&ps, th.hf_threshold_hz);
     let cutoff = detect_baseband_cutoff(&ps, th.baseband_max_hz);
-    let (flags, status) = judge(slope, hf_ratio, cutoff, th);
+    let cd_wall = detect_cd_wall(&ps, th.cd_cutoff_hz, th.cd_wall_step_db, th.cd_wall_floor_db);
+    let (flags, status) = judge(slope, hf_ratio, cutoff, cd_wall, th);
 
     Ok(DsdVerdict {
         file: path.display().to_string(),

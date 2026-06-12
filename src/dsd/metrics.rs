@@ -5,6 +5,11 @@
 /// calibrated `detect_cutoff` (`crate::spectrum`); a shared helper could be factored out later.
 const BASEBAND_PEAK_DB: f64 = 65.0;
 
+/// CD-wall step detector geometry: compare a band this far below the wall against one this far
+/// above it, each `CD_WALL_SPAN_HZ` wide, skipping `CD_WALL_GAP_HZ` of transition on each side.
+const CD_WALL_GAP_HZ: f64 = 500.0;
+const CD_WALL_SPAN_HZ: f64 = 2_000.0;
+
 /// An averaged power spectrum: linear power per FFT bin, with the bin→Hz mapping.
 pub struct PowerSpectrum {
     /// Linear (mean) power per bin, index 0 = DC. Length = fft_size/2.
@@ -111,6 +116,43 @@ pub fn detect_baseband_cutoff(ps: &PowerSpectrum, max_hz: f64) -> Option<f64> {
     }
 }
 
+/// Mean linear power over the bins whose center frequency falls in `[lo, hi]`.
+fn mean_power_band(ps: &PowerSpectrum, lo: f64, hi: f64) -> f64 {
+    let lo_bin = ps.bin_at(lo).min(ps.power.len());
+    let hi_bin = ps.bin_at(hi).min(ps.power.len());
+    if lo_bin >= hi_bin {
+        return 0.0;
+    }
+    let band = &ps.power[lo_bin..hi_bin];
+    band.iter().sum::<f64>() / band.len() as f64
+}
+
+/// Detect a sharp brick-wall **step** right at the CD Nyquist (~22.05 kHz) — the digital-ADC
+/// signature of CD-sourced material, distinct from a genuine master's gentle analog roll-off.
+///
+/// Unlike `detect_baseband_cutoff` (a global "65 dB below the baseband peak" test, which a high
+/// modulator noise floor above the wall can bury), this compares a narrow band just *below* the
+/// wall against one just *above* it. It fires only when (a) real music reaches the wall — the
+/// below-band stays within `floor_db` of the baseband peak — and (b) the power drops by at least
+/// `step_db` across it. A gentle analog roll-off has no such sharp step, so it is not flagged.
+pub fn detect_cd_wall(ps: &PowerSpectrum, cd_hz: f64, step_db: f64, floor_db: f64) -> bool {
+    let below = mean_power_band(ps, cd_hz - CD_WALL_GAP_HZ - CD_WALL_SPAN_HZ, cd_hz - CD_WALL_GAP_HZ);
+    let above = mean_power_band(ps, cd_hz + CD_WALL_GAP_HZ, cd_hz + CD_WALL_GAP_HZ + CD_WALL_SPAN_HZ);
+    if below <= 0.0 || above <= 0.0 {
+        return false;
+    }
+
+    // Music must actually reach the wall — otherwise a quiet region's noise-vs-noise step is
+    // meaningless (e.g. a track that already rolled off at 15 kHz).
+    let peak = ps.power[..ps.bin_at(cd_hz).max(1)].iter().cloned().fold(0.0f64, f64::max);
+    if peak <= 0.0 || below < peak * 10f64.powf(-floor_db / 10.0) {
+        return false;
+    }
+
+    let drop_db = 10.0 * (below / above).log10();
+    drop_db >= step_db
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +199,52 @@ mod tests {
         let ps = PowerSpectrum { power, bin_hz };
         let r = hf_energy_ratio(&ps, 800.0 * bin_hz);
         assert!(r < 0.01, "ratio = {r}");
+    }
+
+    /// Build a DSD64-scale spectrum: full power (`band_db` dB rel. peak) up to `wall_hz`, then a
+    /// floor (`above_db`) above it. Peak (0 dB) sits at a low bin.
+    fn wall_spectrum(wall_hz: f64, band_db: f64, above_db: f64) -> PowerSpectrum {
+        let bin_hz = 2_822_400.0 / 65_536.0; // ~43 Hz
+        let half = 65_536 / 2;
+        let mut power = vec![10f64.powf(above_db / 10.0); half];
+        let wall_bin = (wall_hz / bin_hz) as usize;
+        for p in power.iter_mut().take(wall_bin) {
+            *p = 10f64.powf(band_db / 10.0);
+        }
+        power[10] = 1.0; // peak = 0 dB at a low bin
+        PowerSpectrum { power, bin_hz }
+    }
+
+    #[test]
+    fn cd_wall_detects_sharp_step_above_the_noise_floor() {
+        // Music to 22.05k at -30 dB, then a -55 dB floor above — a 25 dB step the global
+        // "65 dB below peak" test would miss (the floor sits within 65 dB of the peak).
+        let ps = wall_spectrum(22_050.0, -30.0, -55.0);
+        assert!(detect_cd_wall(&ps, 22_050.0, 20.0, 50.0));
+        // The global cutoff detector misses it (floor is within 65 dB → no cutoff before ceiling).
+        assert_eq!(detect_baseband_cutoff(&ps, 24_000.0), None);
+    }
+
+    #[test]
+    fn cd_wall_ignores_gentle_rolloff() {
+        // Only a ~6 dB difference across the wall — a gentle analog roll-off, not a brick wall.
+        let ps = wall_spectrum(22_050.0, -30.0, -36.0);
+        assert!(!detect_cd_wall(&ps, 22_050.0, 20.0, 50.0));
+    }
+
+    #[test]
+    fn cd_wall_ignores_noise_buried_wall() {
+        // Music below the wall is weaker than the noise above it (the crude-modulator case): no
+        // visible step, so nothing to detect.
+        let ps = wall_spectrum(22_050.0, -60.0, -55.0);
+        assert!(!detect_cd_wall(&ps, 22_050.0, 20.0, 50.0));
+    }
+
+    #[test]
+    fn cd_wall_ignores_silence_at_the_wall() {
+        // A track that already rolled off far below the wall: the below-band is deep noise, well
+        // past `floor_db` from the peak, so a noise-vs-noise step does not count.
+        let ps = wall_spectrum(15_000.0, -30.0, -90.0);
+        assert!(!detect_cd_wall(&ps, 22_050.0, 20.0, 50.0));
     }
 }
