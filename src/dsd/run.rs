@@ -484,3 +484,143 @@ fn build_json(outcomes: &[DsdOutcome]) -> DsdReportJson<'_> {
 
     DsdReportJson { scanned: outcomes.len(), summary, results, errors }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dsd::judge::DsdFlag;
+    use std::f32::consts::PI;
+    use std::io::Write as _;
+
+    const SR: u32 = 2_822_400; // DSD64
+    const BLOCK: u32 = 4096; // bytes/channel/group
+    const N_SAMPLES: usize = 262_144; // = 8 groups of 32768 samples (mono), 32 frames @ fft 8192
+    const FFT: usize = 8192;
+
+    /// Sum of equal-amplitude tones from 100 Hz up to `f_hi`, decorrelated by a per-tone phase and
+    /// normalized to 0.4 peak — a band-limited broadband source. Above `f_hi` the only energy in
+    /// the modulated output is the SDM's shaped quantization noise.
+    fn band_limited(f_hi: f32) -> Vec<f32> {
+        let mut sig = vec![0f32; N_SAMPLES];
+        let mut f = 100.0;
+        while f < f_hi {
+            let w = 2.0 * PI * f / SR as f32;
+            for (i, s) in sig.iter_mut().enumerate() {
+                *s += (i as f32 * w + f).sin(); // `+ f` = per-tone phase offset
+            }
+            f += 200.0;
+        }
+        // Normalize to a fairly hot 0.6 peak: the ±1 quantizer noise power is fixed, so a louder
+        // signal sits further above the shaped noise floor, giving the baseband cutoff a clean step
+        // to detect (mirroring a real, well-modulated CD→DSD).
+        let peak = sig.iter().fold(0f32, |m, &x| m.max(x.abs()));
+        if peak > 0.0 {
+            let g = 0.6 / peak;
+            for s in &mut sig {
+                *s *= g;
+            }
+        }
+        sig
+    }
+
+    /// Second-order error-feedback sigma-delta modulator (noise transfer (1-z^-1)^2): shapes
+    /// quantization noise upward at ~+12 dB/oct with low in-band noise — the genuine-DSD
+    /// fingerprint, in miniature. Stable for the modest (0.4-peak) inputs used here.
+    fn sdm2(signal: &[f32]) -> Vec<bool> {
+        let mut e1 = 0.0f64;
+        let mut e2 = 0.0f64;
+        signal
+            .iter()
+            .map(|&x| {
+                let v = x as f64 + 2.0 * e1 - e2;
+                let y = if v >= 0.0 { 1.0 } else { -1.0 };
+                e2 = e1;
+                e1 = v - y;
+                y > 0.0
+            })
+            .collect()
+    }
+
+    /// Pack ±1 bits LSB-first (DSF order): bit i of sample 8k+i goes into byte k.
+    fn pack_lsb(bits: &[bool]) -> Vec<u8> {
+        bits.chunks(8)
+            .map(|c| c.iter().enumerate().fold(0u8, |b, (i, &on)| b | ((on as u8) << i)))
+            .collect()
+    }
+
+    /// Wrap mono DSD bytes in a minimal valid DSF container.
+    fn build_dsf_mono(data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"DSD ");
+        v.extend_from_slice(&28u64.to_le_bytes());
+        v.extend_from_slice(&0u64.to_le_bytes());
+        v.extend_from_slice(&0u64.to_le_bytes());
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&52u64.to_le_bytes());
+        v.extend_from_slice(&1u32.to_le_bytes()); // version
+        v.extend_from_slice(&0u32.to_le_bytes()); // format id (DSD raw)
+        v.extend_from_slice(&0u32.to_le_bytes()); // channel type
+        v.extend_from_slice(&1u32.to_le_bytes()); // 1 channel
+        v.extend_from_slice(&SR.to_le_bytes());
+        v.extend_from_slice(&1u32.to_le_bytes()); // bits
+        v.extend_from_slice(&((data.len() * 8) as u64).to_le_bytes());
+        v.extend_from_slice(&BLOCK.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&((12 + data.len()) as u64).to_le_bytes());
+        v.extend_from_slice(data);
+        v
+    }
+
+    fn write_temp(bytes: &[u8]) -> PathBuf {
+        use std::sync::atomic::AtomicU64;
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let id = SEQ.fetch_add(1, Ordering::Relaxed);
+        let mut p = std::env::temp_dir();
+        p.push(format!("lc_dsd_integ_{}_{id}.dsf", std::process::id()));
+        std::fs::File::create(&p).unwrap().write_all(bytes).unwrap();
+        p
+    }
+
+    /// Lower the slope gate so the 1st-order modulator's ~+6 dB/oct counts as genuine SDM.
+    fn test_thresholds() -> DsdThresholds {
+        DsdThresholds { min_noise_shaping_slope: 3.0, ..Default::default() }
+    }
+
+    /// Naive 1-bit conversion with NO noise shaping: just the sign of each sample. The quantization
+    /// noise stays white (flat), so the noise-shaping slope is ~0 — a "PCM crudely dumped to 1-bit"
+    /// fake that lacks the DSD fingerprint.
+    fn sign_quantize(signal: &[f32]) -> Vec<bool> {
+        signal.iter().map(|&x| x >= 0.0).collect()
+    }
+
+    /// Run a ready-made bitstream through the full container → analysis → verdict pipeline.
+    fn verdict_of(bits: &[bool]) -> DsdVerdict {
+        let data = pack_lsb(bits);
+        let path = write_temp(&build_dsf_mono(&data));
+        let v = analyze_one(&path, FFT, &test_thresholds()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        v
+    }
+
+    /// A genuine SDM bitstream of a 26 kHz-band source: noise shaping present, no baseband cutoff,
+    /// judged Pass through the full container → analysis → verdict pipeline.
+    #[test]
+    fn synthetic_genuine_dsd_passes() {
+        let v = verdict_of(&sdm2(&band_limited(26_000.0)));
+        assert!(v.noise_shaping_slope > 3.0, "slope = {}", v.noise_shaping_slope);
+        assert_eq!(v.baseband_cutoff_hz, None, "unexpected cutoff: {:?}", v.baseband_cutoff_hz);
+        assert_eq!(v.status, VerdictStatus::Pass, "flags = {:?}", v.flags);
+    }
+
+    /// The same source dumped to 1-bit WITHOUT noise shaping: the slope is flat, so the file lacks
+    /// the DSD fingerprint and is judged Suspicious. (The complementary "CD→DSD with a 22 kHz wall
+    /// but genuine slope" case is covered by the judge unit tests.)
+    #[test]
+    fn synthetic_unshaped_fake_is_suspicious() {
+        let v = verdict_of(&sign_quantize(&band_limited(12_000.0)));
+        assert!(v.noise_shaping_slope < 3.0, "slope unexpectedly steep: {}", v.noise_shaping_slope);
+        assert_eq!(v.status, VerdictStatus::Suspicious);
+        assert!(v.flags.contains(&DsdFlag::WeakNoiseShaping), "flags = {:?}", v.flags);
+    }
+}
