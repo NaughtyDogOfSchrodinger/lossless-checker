@@ -1,11 +1,14 @@
 //! Welch power-spectrum primitives.
 //!
 //! A file's samples are unpacked in bounded batches (the 1-bit stream expands to 32× its size as
-//! `f32`, so it is never held whole) and handed to [`WelchPlan::power_sum`], which transforms every
-//! whole `fft_size` frame and sums the magnitude-squared per bin. Frames are independent, so within
-//! one batch they are FFT'd in parallel — that is the per-file speedup. Frame contiguity across
-//! batch boundaries is preserved by the caller (it carries the trailing partial frame forward), so
-//! the result is bit-for-bit identical to a single-threaded sweep.
+//! `f32`, so it is never held whole) and handed to [`WelchPlan::power_sum_into`], which transforms
+//! every whole `fft_size` frame and sums the magnitude-squared per bin. Frames are independent, so a
+//! batch can be FFT'd across a pool of workers — but only when one file has the machine to itself.
+//! When the caller is already parallel across files, the worker pool is sized to one and the frames
+//! run sequentially, since a nested per-frame `par_iter` would just oversubscribe the thread pool.
+//! Either way, frame contiguity across batch boundaries is preserved by the caller (it carries the
+//! trailing partial frame forward), so the result is bit-for-bit identical to a single-threaded
+//! sweep.
 
 use std::sync::Arc;
 
@@ -36,13 +39,16 @@ impl WelchPlan {
         self.fft_size
     }
 
-    /// A pool of reusable per-thread FFT workers, sized to the rayon pool. Allocate once per file
-    /// and reuse across every batch so the (large, FFT-sized) scratch buffers are not re-allocated
-    /// per flush.
-    pub fn worker_pool(&self) -> Vec<FrameWorker<'_>> {
-        (0..rayon::current_num_threads().max(1))
-            .map(|_| FrameWorker::new(self))
-            .collect()
+    /// A pool of `threads` reusable FFT workers. Allocate once per file and reuse across every batch
+    /// so the (large, FFT-sized) scratch buffers are not re-allocated per flush.
+    ///
+    /// `threads == 1` makes [`power_sum_into`](Self::power_sum_into) transform frames sequentially.
+    /// That is the right choice when the *caller* is already parallel across files: the outer
+    /// `par_iter` saturates the pool, so adding a nested per-frame `par_iter` only oversubscribes it
+    /// (measured ~5× more CPU for the same work). Pass the full pool size only when one file has the
+    /// machine to itself.
+    pub fn worker_pool(&self, threads: usize) -> Vec<FrameWorker<'_>> {
+        (0..threads.max(1)).map(|_| FrameWorker::new(self)).collect()
     }
 
     /// Sum `|FFT(frame · window)|²` over every whole `fft_size` frame in `samples`, **adding** the
@@ -60,16 +66,26 @@ impl WelchPlan {
         if frames == 0 {
             return 0;
         }
-        let per_worker = frames.div_ceil(workers.len());
 
-        workers.par_iter_mut().enumerate().for_each(|(i, w)| {
+        // Single worker => sequential, skipping rayon's join/work-steal machinery entirely (the
+        // caller is parallel across files). With more workers, split the frames into one contiguous
+        // range each and transform them in parallel.
+        if let [w] = workers {
             w.reset();
-            let lo = (i * per_worker).min(frames) * self.fft_size;
-            let hi = ((i + 1) * per_worker).min(frames) * self.fft_size;
-            for frame in samples[lo..hi].chunks_exact(self.fft_size) {
+            for frame in samples[..frames * self.fft_size].chunks_exact(self.fft_size) {
                 w.accumulate(frame);
             }
-        });
+        } else {
+            let per_worker = frames.div_ceil(workers.len());
+            workers.par_iter_mut().enumerate().for_each(|(i, w)| {
+                w.reset();
+                let lo = (i * per_worker).min(frames) * self.fft_size;
+                let hi = ((i + 1) * per_worker).min(frames) * self.fft_size;
+                for frame in samples[lo..hi].chunks_exact(self.fft_size) {
+                    w.accumulate(frame);
+                }
+            });
+        }
 
         let mut count = 0;
         for w in workers.iter() {
@@ -130,7 +146,7 @@ mod tests {
     use super::*;
 
     fn power_sum(plan: &WelchPlan, samples: &[f32]) -> (Vec<f64>, u64) {
-        let mut workers = plan.worker_pool();
+        let mut workers = plan.worker_pool(rayon::current_num_threads());
         let mut sum = vec![0.0f64; plan.fft_size() / 2];
         let count = plan.power_sum_into(samples, &mut workers, &mut sum);
         (sum, count)

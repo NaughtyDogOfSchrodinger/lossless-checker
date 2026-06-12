@@ -40,7 +40,8 @@ pub fn run_export_spectrum(args: ExportArgs) -> i32 {
         }
     };
 
-    let (meta, per_channel) = match accumulate(reader.as_mut(), args.fft_size) {
+    // Single-file export: parallelize this file's frames across the whole pool.
+    let (meta, per_channel) = match accumulate(reader.as_mut(), args.fft_size, true) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{}: {e}", lang.pick("读取失败", "failed to read"));

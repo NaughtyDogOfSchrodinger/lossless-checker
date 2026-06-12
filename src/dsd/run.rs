@@ -85,10 +85,13 @@ pub fn run_check_dsd(args: DsdCheckArgs) -> i32 {
     let done = AtomicUsize::new(0);
     let fft_size = args.fft_size;
     let th = &args.thresholds;
+    // With multiple files the outer `par_iter` already keeps every core busy, so each file FFTs its
+    // frames sequentially. A lone file instead parallelizes its own frames to use the whole machine.
+    let parallel_frames = total == 1;
     let mut outcomes: Vec<DsdOutcome> = files
         .par_iter()
         .map(|p| {
-            let result = analyze_one(p, fft_size, th);
+            let result = analyze_one(p, fft_size, th, parallel_frames);
             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
             if n % 10 == 0 || n == total {
                 eprint!("\r{} {n}/{total}", lang.pick("分析中…", "Analyzing…"));
@@ -155,14 +158,19 @@ pub(crate) fn open_reader(path: &Path) -> Result<Box<dyn DsdStream>, DsdError> {
     }
 }
 
-fn analyze_one(path: &Path, fft_size: usize, th: &DsdThresholds) -> Result<DsdVerdict, DsdError> {
+fn analyze_one(
+    path: &Path,
+    fft_size: usize,
+    th: &DsdThresholds,
+    parallel_frames: bool,
+) -> Result<DsdVerdict, DsdError> {
     let container = match container_of(path) {
         Some(c) => c,
         None => return Err(DsdError::Unsupported("not a DSD extension".into())),
     };
 
     let result = open_reader(path)
-        .and_then(|mut r| analyze_stream(r.as_mut(), path, fft_size, th));
+        .and_then(|mut r| analyze_stream(r.as_mut(), path, fft_size, th, parallel_frames));
 
     // "Structurally valid but unhandled" (non-1-bit DSF, DST-compressed DFF, missing chunks) is a
     // normal Unsupported *verdict*, not a parse failure — only truncation/bad-magic/I/O are errors.
@@ -187,13 +195,17 @@ pub(crate) type ChannelSpectra = Vec<(Vec<f64>, u64)>;
 pub(crate) fn accumulate(
     reader: &mut dyn DsdStream,
     fft_size: usize,
+    parallel_frames: bool,
 ) -> Result<(DsdMeta, ChannelSpectra), DsdError> {
     let meta = reader.meta().clone();
     let channels = meta.channels.max(1) as usize;
     let half = fft_size / 2;
 
     let plan = WelchPlan::new(fft_size);
-    let mut workers = plan.worker_pool(); // allocated once, reused across every flush
+    // Parallelize frames within a file only when this file has the pool to itself; when the caller
+    // is already parallel across files, a nested per-frame `par_iter` just oversubscribes the pool.
+    let threads = if parallel_frames { rayon::current_num_threads().max(1) } else { 1 };
+    let mut workers = plan.worker_pool(threads); // allocated once, reused across every flush
     // Per channel: running (power sum, frame count) and one persistent pending-sample buffer. Whole
     // frames are FFT'd on flush and drained, leaving only the (<fft_size) partial-frame tail — which
     // keeps the next batch's frames contiguous with this one's.
@@ -281,8 +293,9 @@ fn analyze_stream(
     path: &Path,
     fft_size: usize,
     th: &DsdThresholds,
+    parallel_frames: bool,
 ) -> Result<DsdVerdict, DsdError> {
-    let (meta, per_channel) = accumulate(reader, fft_size)?;
+    let (meta, per_channel) = accumulate(reader, fft_size, parallel_frames)?;
     let sum = match mix_power(&per_channel, fft_size) {
         Some(s) => s,
         None => return Ok(unsupported(path, meta.format)),
@@ -653,7 +666,7 @@ mod tests {
     fn verdict_of(bits: &[bool]) -> DsdVerdict {
         let data = pack_lsb(bits);
         let path = write_temp(&build_dsf_mono(&data));
-        let v = analyze_one(&path, FFT, &test_thresholds()).unwrap();
+        let v = analyze_one(&path, FFT, &test_thresholds(), true).unwrap();
         let _ = std::fs::remove_file(&path);
         v
     }
