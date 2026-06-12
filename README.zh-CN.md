@@ -269,6 +269,8 @@ cargo run --release -- ~/Music --report scan.txt --json scan.json
 它的价值在于**从大库里批量揪出高度可疑的文件**。对被标记的文件，建议用 [Spek](https://www.spek.cc/)
 等工具看一眼频谱图再下最终结论。
 
+这些局限的改进计划记录在 [ROADMAP.md](./ROADMAP.md)。
+
 ## 许可证
 
 GPL-3.0 —— 见 [LICENSE](./LICENSE)。

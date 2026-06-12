@@ -296,6 +296,8 @@ Its job is to **batch-flag the highly suspicious files** in a large library. Alw
 flagged file by eyeballing its spectrogram in a tool like [Spek](https://www.spek.cc/) before
 drawing conclusions.
 
+Planned mitigations for these limitations are tracked in [ROADMAP.md](./ROADMAP.md).
+
 ## License
 
 GPL-3.0 — see [LICENSE](./LICENSE).
