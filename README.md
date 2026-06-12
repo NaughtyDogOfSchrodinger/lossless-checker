@@ -283,9 +283,14 @@ album-wide 22.05 kHz wall, while a 1977 analog-master DSD and a 2020 native DSD 
 > `--slope-lo/-hi`, `--hf-threshold`, `--format json`, `-v`).
 
 > **Performance:** every frame is FFT-analyzed (no subsampling), but the per-file FFT work runs in
-> parallel across CPU cores — so a full DSD64 track (~186 MB / ~3 min) analyzes in **under a second**
-> on a modern multi-core machine (≈3.8× faster than the former single-threaded path), and libraries
-> also fan out across files. The result is bit-for-bit identical to a single-threaded sweep.
+> parallel across CPU cores, and the result is bit-for-bit identical to a single-threaded sweep.
+> The speedup holds as files grow, and libraries also fan out across files. Measured per file on a
+> modern multi-core machine:
+>
+> | Rate | File size | Single-threaded | Parallel | Speedup |
+> |------|-----------|-----------------|----------|---------|
+> | DSD64  | 186 MB | 3.3 s  | 0.87 s | 3.8× |
+> | DSD256 | 894 MB | 12.6 s | 4.1 s  | 3.1× |
 
 **Export a spectrum** for plotting (the genuine-vs-fake comparison that drives calibration):
 
