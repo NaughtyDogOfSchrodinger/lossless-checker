@@ -2,7 +2,7 @@
 
 > 本文记录 `check-dsd` 各阈值的标定流程、起步默认值与已采集的参照样本。
 > 阈值是**经验值**，必须用真/假/DXD 样本验证后才可信。判定逻辑与指标定义见
-> [`dsd-detection-design.md`](../dsd-detection-design.md)。
+> README 的 “DSD authenticity” 小节与 `src/dsd/` 源码。
 
 ## 1. 指标回顾
 

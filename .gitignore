@@ -13,3 +13,6 @@
 # Local scan reports — reference personal library paths, keep out of the public repo
 /SUSPECTS.md
 /scan-results.tsv
+
+# Local development docs / design notes — kept out of the public repo
+/dev-docs
