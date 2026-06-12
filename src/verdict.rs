@@ -78,16 +78,10 @@ pub struct Analysis {
 /// Classify spectral features into a verdict, taking the declared sample rate into account.
 ///
 /// Hi-res PCM (> 48k): real content must extend past the CD wall, otherwise the file is CD/lossy
-/// content upsampled into a hi-res container (`Upsampled`). CD-rate (and DSD): the absolute-Hz
-/// cutoff thresholds on the audible band. Holes are intentionally NOT consulted here (report-only).
-///
-/// DSD is deliberately excluded from the hi-res upsample check: its ultrasonic region is
-/// noise-shaping noise (not signal) and what we observe is shaped by the ffmpeg decode filter, so
-/// the "does content extend past 28 kHz" test is meaningless and would false-positive on every DSD.
-/// Instead DSD is judged on its audible-band cutoff like a CD-rate file — which still catches DSD
-/// genuinely sourced from a low-bitrate lossy master (audible cutoff < 16.5 kHz).
-pub fn classify(f: &SpectralFeatures, sample_rate: u32, is_dsd: bool) -> Verdict {
-    if sample_rate > 48_000 && !is_dsd {
+/// content upsampled into a hi-res container (`Upsampled`). CD-rate: the absolute-Hz cutoff
+/// thresholds on the audible band. Holes are intentionally NOT consulted here (report-only).
+pub fn classify(f: &SpectralFeatures, sample_rate: u32) -> Verdict {
+    if sample_rate > 48_000 {
         // `map_or(true, …)` instead of `is_none_or` so the crate builds on Rust < 1.82.
         let empty = f.hires_ext_db.map_or(true, |db| db < HIRES_EMPTY_DB);
         if f.cutoff_hz < HIRES_MIN_EXT || empty {

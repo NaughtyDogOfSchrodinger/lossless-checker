@@ -1,8 +1,8 @@
 //! Native DSD authenticity checker.
 //!
-//! Unlike the PCM path (which decodes via ffmpeg to 88.2k and only sees the audible band), this
-//! module parses the DSD container itself, pulls the raw 1-bit stream, and measures the full-band
-//! power spectrum up to the DSD Nyquist (~1.41 MHz for DSD64). That exposes the one fingerprint a
+//! This module parses the DSD container itself, pulls the raw 1-bit stream, and measures the
+//! full-band power spectrum up to the DSD Nyquist (~1.41 MHz for DSD64). That exposes the one
+//! fingerprint a
 //! transcoder cannot cheaply fake: **noise shaping** — the Sigma-Delta quantization noise pushed
 //! up into 50–100 kHz. A genuine DSD master shows a strong positive slope there; a PCM/lossy source
 //! "washed" into DSD does not, and often still carries a CD/lossy cutoff in the baseband.

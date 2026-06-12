@@ -7,15 +7,15 @@
 也可对整个音乐库批量扫描、输出排好序的可疑清单。
 
 - **严格只读**——只分析、只报告，绝不移动、改名或删除任何文件。
-- **纯 Rust 解码** FLAC、ALAC、WAV、AIFF、CAF 等，无系统依赖。DSD（`.dsf`/`.dff`）通过**可选的
-  ffmpeg 兜底**解码（仅在扫描 DSD 时才需要）。
+- **纯 Rust、零系统依赖**——FLAC/ALAC/WAV/AIFF/CAF 走 symphonia;DSD（`.dsf`/`.dff`）走原生
+  [`check-dsd`](#dsd-真伪检测-check-dsd) 子命令。
 - **Hi-Res 感知**——可检测上采样、空高频段、以及频谱空洞。
 - **并行**——几千个文件的库在现代机器上几分钟即可扫完。
 
 ## 原理
 
 一切都基于解码后的 PCM 推断——容器声称的格式、码率、采样率一律不信。工具用
-[symphonia](https://github.com/pdeljanov/Symphonia)（DSD 走 ffmpeg）解码音频，对**整首歌**做分段
+[symphonia](https://github.com/pdeljanov/Symphonia) 解码音频，对**整首歌**做分段
 加窗 FFT（[rustfft](https://github.com/ejmahler/RustFFT)，采用 Blackman-Harris 窗）、对功率谱取
 平均，再跑三个检测器。Blackman-Harris 窗的旁瓣极低（约 −92 dB），可避免低频能量泄漏上溢、掩盖有损
 截止断崖。
@@ -98,30 +98,12 @@ cargo build --release
 # 可执行文件在 ./target/release/lossless-checker
 ```
 
-### 可选：DSD 支持
-
-DSD（`.dsf`/`.dff`）没有纯 Rust 解码器，工具会调用 **ffmpeg** 把它解到 PCM。其他格式都不需要
-ffmpeg。仅在你要扫描 DSD 时才需安装：
-
-```bash
-# macOS
-brew install ffmpeg
-# Debian/Ubuntu
-sudo apt install ffmpeg
-```
-
-若没装 ffmpeg 又指向 DSD 文件，工具会对该文件报一个清晰的错误并跳过，不影响整次扫描的其余部分。
-
-DSD **只按可听频段判定**：它的超声区是噪声整形噪声（不是信号），且解码后留下多少取决于抽取滤波器，
-因此 Hi-Res 上采样检测**不**作用于 DSD（否则会把每个 DSD 都误报）。若某 DSD 确实来自低码率有损母带，
-仍能通过其可听截止揪出（< 16.5 kHz 判 🚩）。
-
 ## 使用
 
 工具分两个子命令：
 
-- **`check`** —— PCM 假无损检测（FLAC/ALAC/WAV/…；DSD 经 ffmpeg 转 PCM）。本节全部内容。
-- **`check-dsd`** —— 原生 **DSD 真伪检测**（自解析 `.dsf`，不依赖 ffmpeg）。见下文
+- **`check`** —— PCM 假无损检测（FLAC/ALAC/WAV/…）。本节全部内容。
+- **`check-dsd`** —— 原生 **DSD 真伪检测**（自解析 `.dsf`/`.dff`，零系统依赖）。见下文
   [DSD 真伪检测](#dsd-真伪检测-check-dsd)。
 
 **单文件** —— 输出详细判断：
@@ -211,7 +193,7 @@ cargo run --release -- check ~/Music --report scan.txt --json scan.json
 | `--threshold`  | `10.0`                  | 底噪倍数——仅在 `--noise-floor` 时生效。 |
 | `--report`     | stdout                  | 把文本报告写到此文件（仅目录扫描）。 |
 | `--json`       | —                       | 额外把 JSON 报告写到此文件（仅目录扫描）。 |
-| `--ext`        | `flac,wav,m4a,aif,aiff,caf,alac,dsf,dff` | 逗号分隔的扫描扩展名。只扫无损容器 + DSD——扫 mp3 等本身有损的格式对检测假无损没有意义。 |
+| `--ext`        | `flac,wav,m4a,aif,aiff,caf,alac` | 逗号分隔的扫描扩展名。只扫无损/PCM 容器——扫 mp3 等本身有损的格式没有意义,DSD 走 `check-dsd`。 |
 | `--jobs`       | CPU 核数                | 并行线程数。 |
 | `--lang`       | `zh`                    | 日志与报告的语言：`zh`（中文，默认）或 `en`。JSON 报告不受影响。 |
 
@@ -243,14 +225,14 @@ cargo run --release -- check ~/Music --report scan.txt --json scan.json
 
 ## DSD 真伪检测（`check-dsd`）
 
-`check` 对 DSD 只看*可听频段*（经 ffmpeg 转 PCM），只能揪出"DSD 来自低码率有损母带"。镜像问题
-——**CD/PCM 洗成 DSD** ——需要另一种信号，故独立成子命令：
+DSD（`.dsf`/`.dff`）独立成子命令——对 DSD 要问的不是"是否有损转码",而是
+**"这是真 DSD 母带,还是 PCM/CD 洗成的 DSD?"**：
 
 ```bash
 cargo run --release -- check-dsd ~/DSD --album-summary
 ```
 
-`check-dsd` **不依赖 ffmpeg**。它自己解析 `.dsf` 容器，取出原始 1-bit 流，直接计算其全频段功率谱
+`check-dsd` **零系统依赖**。它自己解析 `.dsf`/`.dff` 容器，取出原始 1-bit 流，直接计算其全频段功率谱
 （到 DSD 奈奎斯特，DSD64 约 1.41 MHz）。这暴露了转制者难以低成本伪造的物理指纹：**噪声整形**
 ——真 DSD 母带把 Sigma-Delta 量化噪声推向 50–100 kHz，频谱在那里显著上扬（正斜率）。由 PCM/有损
 转制的假 DSD 缺这段上扬，且基带常残留 CD/有损截止。整条比特流流式处理，内存与文件大小解耦。
@@ -318,8 +300,8 @@ gnuplot/matplotlib/Excel 即可：真 DSD 有基带、然后 50 kHz 以上陡峭
 - **Hi-Res 阈值同样是启发式。** 上采样检测假设真 Hi-Res 内容会延伸过 ~28 kHz；个别真品母带若本身
   就滚降到该频率以下（少见，多为老的模拟源）可能被读成 🔼。这些阈值目前是经过推理的默认值，待用
   带标注的 Hi-Res 样本集进一步校准。
-- **`check` 下的 DSD 需要 ffmpeg**（见[上文](#可选dsd-支持)）；没有它时 DSD 文件会被报错跳过而不
-  参与分析。原生 [`check-dsd`](#dsd-真伪检测-check-dsd) 子命令则无需 ffmpeg。
+- **DSD 走 [`check-dsd`](#dsd-真伪检测-check-dsd)**,不走 `check`——它直接对 1-bit 流做原生分析
+  （无 ffmpeg、不转 PCM）。
 - **性能：** 它会完整解码每一首，所以大库要跑几分钟（已用满所有 CPU 核）；单文件检查近乎瞬时。
 
 它的价值在于**从大库里批量揪出高度可疑的文件**。对被标记的文件，建议用 [Spek](https://www.spek.cc/)

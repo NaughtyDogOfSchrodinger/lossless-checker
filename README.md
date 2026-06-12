@@ -8,8 +8,8 @@ CD/lossy material upsampled into a 96/192 kHz container. Point it at one file fo
 whole library for a ranked report of the suspects.
 
 - **Read-only** — it analyzes and reports; it never moves, renames, or deletes anything.
-- **Pure-Rust decoding** for FLAC, ALAC, WAV, AIFF, CAF, etc. — no system dependencies. DSD
-  (`.dsf`/`.dff`) decodes via an **optional ffmpeg fallback** (only needed if you scan DSD).
+- **Pure-Rust, zero system dependencies** — FLAC/ALAC/WAV/AIFF/CAF via symphonia; DSD
+  (`.dsf`/`.dff`) via the native [`check-dsd`](#dsd-authenticity-check-dsd) subcommand.
 - **Hi-Res aware** — detects upsampling, empty high-frequency bands, and spectral holes.
 - **Parallel** — a multi-thousand-file library scans in a few minutes on a modern machine.
 
@@ -17,7 +17,7 @@ whole library for a ranked report of the suspects.
 
 Everything is derived from the decoded PCM — the container's claimed format, bitrate, and sample
 rate are never trusted. The tool decodes the audio (via
-[symphonia](https://github.com/pdeljanov/Symphonia); ffmpeg for DSD), runs a
+[symphonia](https://github.com/pdeljanov/Symphonia)), runs a
 Blackman-Harris-windowed FFT ([rustfft](https://github.com/ejmahler/RustFFT)) across the
 **whole track**, averages the power spectrum, and runs three detectors over it. The
 Blackman-Harris window's low sidelobes (~−92 dB) keep low-band energy from leaking up and
@@ -105,34 +105,13 @@ cargo build --release
 # binary at ./target/release/lossless-checker
 ```
 
-### Optional: DSD support
-
-DSD (`.dsf`/`.dff`) has no pure-Rust decoder, so the tool shells out to **ffmpeg** to decode it to
-PCM. Everything else works without ffmpeg. Install it only if you need to scan DSD:
-
-```bash
-# macOS
-brew install ffmpeg
-# Debian/Ubuntu
-sudo apt install ffmpeg
-```
-
-If ffmpeg is missing and you point the tool at a DSD file, it reports a clear error for that file
-and moves on — the rest of the scan is unaffected.
-
-DSD is judged on its **audible band only**: its ultrasonic region is noise-shaping noise (not
-signal) and what survives decoding depends on the decimation filter, so the Hi-Res upsample check
-is *not* applied to DSD (doing so would false-positive on every DSD). A DSD genuinely sourced from a
-low-bitrate lossy master is still caught via its audible cutoff (🚩 below 16.5 kHz).
-
 ## Usage
 
 There are two subcommands:
 
-- **`check`** — the PCM fake-lossless detector (FLAC/ALAC/WAV/…; DSD via ffmpeg → PCM). Everything
-  in this section.
-- **`check-dsd`** — native **DSD authenticity** check (parses `.dsf` itself, no ffmpeg). See
-  [DSD authenticity](#dsd-authenticity-check-dsd) below.
+- **`check`** — the PCM fake-lossless detector (FLAC/ALAC/WAV/…). Everything in this section.
+- **`check-dsd`** — native **DSD authenticity** check (parses `.dsf`/`.dff` itself, no system
+  dependencies). See [DSD authenticity](#dsd-authenticity-check-dsd) below.
 
 > Logs and reports default to **Chinese**. Pass `--lang en` for English (as shown in the examples
 > below). The machine-readable JSON report is the same regardless of language.
@@ -224,7 +203,7 @@ With `--json` you also get machine-readable output. Hi-Res files additionally ca
 | `--threshold`  | `10.0`                  | Noise-floor multiplier — only used with `--noise-floor`. |
 | `--report`     | stdout                  | Write the text report to this file (directory scan only). |
 | `--json`       | —                       | Also write a JSON report to this file (directory scan only). |
-| `--ext`        | `flac,wav,m4a,aif,aiff,caf,alac,dsf,dff` | Comma-separated extensions to scan. Lossless containers + DSD only — scanning mp3 etc. is pointless for fake-lossless detection. |
+| `--ext`        | `flac,wav,m4a,aif,aiff,caf,alac` | Comma-separated extensions to scan. Lossless/PCM containers only — scanning mp3 etc. is pointless for fake-lossless detection, and DSD goes through `check-dsd`. |
 | `--jobs`       | CPU cores               | Number of parallel worker threads. |
 | `--lang`       | `zh`                    | Output language for logs and reports: `zh` (中文, default) or `en`. The JSON report is unaffected. |
 
@@ -261,16 +240,16 @@ original bitrate:
 
 ## DSD authenticity (`check-dsd`)
 
-`check` judges DSD on its *audible band* (via ffmpeg → PCM), which only catches DSD sourced from a
-low-bitrate lossy master. The mirror problem — **CD/PCM "washed" into DSD** — needs a different
-signal, so it has its own subcommand:
+DSD (`.dsf`/`.dff`) has its own subcommand — the question for DSD isn't "lossy transcode?" but
+**"is this a genuine DSD master, or PCM/CD washed into DSD?"**:
 
 ```bash
 cargo run --release -- check-dsd ~/DSD --album-summary --lang en
 ```
 
-`check-dsd` **does not use ffmpeg**. It parses the `.dsf` container itself, pulls the raw 1-bit
-stream, and measures its full-band power spectrum up to the DSD Nyquist (~1.41 MHz for DSD64). That
+`check-dsd` needs **no system dependencies**. It parses the `.dsf`/`.dff` container itself, pulls
+the raw 1-bit stream, and measures its full-band power spectrum up to the DSD Nyquist (~1.41 MHz for
+DSD64). That
 exposes the one fingerprint a transcoder can't cheaply fake: **noise shaping** — the Sigma-Delta
 quantization noise a genuine DSD master pushes up into 50–100 kHz (a strong positive slope). A
 PCM/lossy source converted to DSD lacks that rise and often still carries a CD/lossy cutoff in the
@@ -352,9 +331,8 @@ The full set of caveats:
   reaches past ~28 kHz; a legitimate master that genuinely rolls off below that (rare — usually an
   old analog source) can read 🔼. The thresholds ship as reasoned defaults pending calibration
   against a labelled Hi-Res fixture set.
-- **DSD under `check` needs ffmpeg** (see [above](#optional-dsd-support)); without it, DSD files are
-  skipped with an error rather than analyzed. The native [`check-dsd`](#dsd-authenticity-check-dsd)
-  subcommand needs no ffmpeg.
+- **DSD goes through [`check-dsd`](#dsd-authenticity-check-dsd)**, not `check` — it is analyzed
+  natively from the 1-bit stream (no ffmpeg, no decode-to-PCM).
 - **Performance:** it decodes every track in full, so a large library takes a few minutes (it runs
   on all CPU cores). Single-file checks are near-instant.
 

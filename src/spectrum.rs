@@ -45,10 +45,6 @@ pub struct SpectralFeatures {
 pub struct SpectrumOpts {
     pub peak_db: Option<f64>,
     pub threshold_mult: f64,
-    /// True for DSD (decoded via ffmpeg). DSD's ultrasonic region is noise-shaping noise
-    /// shaped by the decode filter, so the hi-res extension metric is meaningless and is
-    /// skipped (the upsample verdict is likewise suppressed in `verdict::classify`).
-    pub is_dsd: bool,
 }
 
 /// Analyze mono PCM and extract the spectral features.
@@ -77,7 +73,7 @@ pub fn analyze(samples: &[f32], sample_rate: u32, opts: SpectrumOpts) -> Spectra
     let smooth = smooth_spectrum(&energy);
 
     let cutoff_hz = detect_cutoff(&energy, &smooth, bin_hz, nyquist, &opts);
-    let hires_ext_db = if sample_rate > 48_000 && !opts.is_dsd {
+    let hires_ext_db = if sample_rate > 48_000 {
         hires_extension_db(&smooth, bin_hz, nyquist)
     } else {
         None
@@ -347,7 +343,7 @@ mod tests {
         let feat = analyze(
             &samples,
             SR,
-            SpectrumOpts { peak_db: Some(40.0), threshold_mult: 10.0, is_dsd: false },
+            SpectrumOpts { peak_db: Some(40.0), threshold_mult: 10.0 },
         );
 
         let nyquist = SR as f32 / 2.0;

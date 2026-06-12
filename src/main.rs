@@ -13,8 +13,8 @@
 // positive); its value is batch-flagging the highly suspicious. It is strictly read-only.
 //
 // Two subcommands:
-//   `check`     — the PCM fake-lossless detector above (FLAC/ALAC/WAV/…; DSD via ffmpeg → PCM).
-//   `check-dsd` — native DSD authenticity check: parses .dsf itself, measures the noise-shaping
+//   `check`     — the PCM fake-lossless detector above (FLAC/ALAC/WAV/…). DSD is not handled here.
+//   `check-dsd` — native DSD authenticity check: parses .dsf/.dff itself, measures the noise-shaping
 //                 spectrum of the raw 1-bit stream (no ffmpeg). See `mod dsd`.
 
 mod decode;
@@ -85,8 +85,9 @@ struct CheckArgs {
     #[arg(long)]
     json: Option<PathBuf>,
 
-    /// Comma-separated extensions to scan (lossless containers + DSD; mp3 etc. are pointless here)
-    #[arg(long, default_value = "flac,wav,m4a,aif,aiff,caf,alac,dsf,dff")]
+    /// Comma-separated extensions to scan (lossless/PCM containers; mp3 etc. are pointless here, and
+    /// DSD goes through the `check-dsd` subcommand)
+    #[arg(long, default_value = "flac,wav,m4a,aif,aiff,caf,alac")]
     ext: String,
 
     /// Number of parallel worker threads (default: number of CPU cores)
@@ -279,11 +280,10 @@ fn run_export(cli: ExportSpectrumArgs) {
 }
 
 /// Build the detection options from CLI knobs.
-fn opts(threshold: f64, peak_db: Option<f64>, is_dsd: bool) -> SpectrumOpts {
+fn opts(threshold: f64, peak_db: Option<f64>) -> SpectrumOpts {
     SpectrumOpts {
         peak_db,
         threshold_mult: threshold,
-        is_dsd,
     }
 }
 
@@ -305,7 +305,7 @@ fn run_single(path: &Path, threshold: f64, peak_db: Option<f64>, lang: Lang) {
     let features = spectrum::analyze(
         &decoded.samples,
         decoded.sample_rate,
-        opts(threshold, peak_db, decoded.is_dsd),
+        opts(threshold, peak_db),
     );
     let nyquist = decoded.sample_rate as f32 / 2.0;
     let ratio = if nyquist > 0.0 {
@@ -313,7 +313,7 @@ fn run_single(path: &Path, threshold: f64, peak_db: Option<f64>, lang: Lang) {
     } else {
         0.0
     };
-    let verdict = classify(&features, decoded.sample_rate, decoded.is_dsd);
+    let verdict = classify(&features, decoded.sample_rate);
 
     println!("{}: {}", lang.pick("文件", "File"), path.display());
     println!("{}: {}", lang.pick("格式", "Format"), decoded.format_label);
@@ -331,15 +331,6 @@ fn run_single(path: &Path, threshold: f64, peak_db: Option<f64>, lang: Lang) {
             "{}: {db:.1} dB ({})",
             lang.pick("高频延伸(>26kHz)", "HF extension (>26kHz)"),
             lang.pick("相对频谱峰值；越低代表高频越空", "relative to spectral peak; lower = emptier highs")
-        );
-    }
-    if decoded.is_dsd {
-        println!(
-            "{}",
-            lang.pick(
-                "（DSD：超声区为噪声整形噪声，仅按可听频段判定，不做上采样判断）",
-                "(DSD: the ultrasonic region is noise-shaping noise; judged on the audible band only, no upsample check)"
-            )
         );
     }
     if features.holes.is_empty() {
@@ -504,7 +495,7 @@ fn analyze_file(path: &Path, threshold: f64, peak_db: Option<f64>, lang: Lang) -
         let features = spectrum::analyze(
             &decoded.samples,
             decoded.sample_rate,
-            opts(threshold, peak_db, decoded.is_dsd),
+            opts(threshold, peak_db),
         );
         let nyquist = decoded.sample_rate as f32 / 2.0;
         Ok(Analysis {
@@ -518,7 +509,7 @@ fn analyze_file(path: &Path, threshold: f64, peak_db: Option<f64>, lang: Lang) -
             },
             hole_count: features.holes.len(),
             hires_ext_db: features.hires_ext_db,
-            verdict: classify(&features, decoded.sample_rate, decoded.is_dsd),
+            verdict: classify(&features, decoded.sample_rate),
         })
     })();
     Outcome {

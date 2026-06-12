@@ -1,12 +1,11 @@
 //! Decoding to mono f32 PCM.
 //!
-//! symphonia handles the lossless/PCM containers (FLAC, ALAC, WAV, AIFF, CAF, …) with no
-//! system dependencies. DSD (.dsf/.dff) has no symphonia codec, so it falls back to an
-//! ffmpeg subprocess that decodes and decimates to PCM.
+//! symphonia handles the lossless/PCM containers (FLAC, ALAC, WAV, AIFF, CAF, …) with no system
+//! dependencies. DSD (.dsf/.dff) has no symphonia codec and is handled by the separate `check-dsd`
+//! subcommand (native 1-bit analysis, see `crate::dsd`), not here.
 
 use std::fs::File;
 use std::path::Path;
-use std::process::Command;
 
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::DecoderOptions;
@@ -17,35 +16,29 @@ use symphonia::core::probe::Hint;
 
 use crate::i18n::Lang;
 
-/// PCM rate we decimate DSD to. Above 48k, so DSD stays in the hi-res branch (its
-/// authenticity check is the same "does real content extend past the CD wall" question);
-/// ffmpeg's decimation also removes the DSD ultrasonic noise-shaping that would otherwise
-/// wreck a raw FFT.
-const DSD_PCM_RATE: u32 = 88_200;
-
 /// Decoded result: mono PCM samples (multi-channel already mixed down) + sample rate +
 /// a human-readable source-format label for the reports.
 pub struct DecodedAudio {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
     pub format_label: String,
-    /// True when this came from DSD via the ffmpeg fallback. DSD's ultrasonic region is
-    /// noise-shaping noise, not signal, and what we observe is shaped by the decode filter —
-    /// so the hi-res upsample check must NOT be applied to it (see `verdict::classify`).
-    pub is_dsd: bool,
 }
 
-/// Decode an audio file to mono f32 PCM. Dispatches DSD to the ffmpeg fallback.
+/// Decode an audio file to mono f32 PCM. DSD is not handled here — point the user at `check-dsd`.
 pub fn decode_audio(path: &Path, lang: Lang) -> Result<DecodedAudio, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase());
     if matches!(ext.as_deref(), Some("dsf") | Some("dff")) {
-        decode_dsd_ffmpeg(path, lang)
-    } else {
-        decode_symphonia(path, lang)
+        return Err(lang
+            .pick(
+                "DSD 文件请用 check-dsd 子命令分析（check 仅处理 PCM/无损容器）",
+                "DSD files: use the `check-dsd` subcommand (`check` handles PCM/lossless only)",
+            )
+            .to_string());
     }
+    decode_symphonia(path, lang)
 }
 
 /// Decode with symphonia, mixing all channels down to mono.
@@ -123,61 +116,6 @@ fn decode_symphonia(path: &Path, lang: Lang) -> Result<DecodedAudio, String> {
         samples: mix_to_mono(samples, channels),
         sample_rate,
         format_label,
-        is_dsd: false,
-    })
-}
-
-/// Decode DSD (.dsf/.dff) via an ffmpeg subprocess to mono f32 PCM at `DSD_PCM_RATE`.
-fn decode_dsd_ffmpeg(path: &Path, lang: Lang) -> Result<DecodedAudio, String> {
-    let output = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args([
-            "-ac",
-            "1",
-            "-ar",
-            &DSD_PCM_RATE.to_string(),
-            "-f",
-            "f32le",
-            "-",
-        ])
-        .output()
-        .map_err(|e| {
-            format!(
-                "{}: {e}",
-                lang.pick(
-                    "需要 ffmpeg 处理 DSD（.dsf/.dff），请先安装 ffmpeg",
-                    "ffmpeg is required to decode DSD (.dsf/.dff); please install ffmpeg",
-                )
-            )
-        })?;
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "{}: {}",
-            lang.pick("ffmpeg 解码 DSD 失败", "ffmpeg failed to decode DSD"),
-            err.trim()
-        ));
-    }
-
-    if output.stdout.len() < 4 {
-        return Err(lang
-            .pick("ffmpeg 没有输出 PCM 数据", "ffmpeg produced no PCM data")
-            .to_string());
-    }
-
-    let samples: Vec<f32> = output
-        .stdout
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect();
-
-    Ok(DecodedAudio {
-        samples,
-        sample_rate: DSD_PCM_RATE,
-        format_label: "DSD (via ffmpeg)".to_string(),
-        is_dsd: true,
     })
 }
 

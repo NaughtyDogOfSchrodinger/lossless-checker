@@ -72,13 +72,14 @@ approach here.
 - **Hi-Res threshold calibration.** `HIRES_MIN_EXT` / `HIRES_EMPTY_DB` in `src/verdict.rs` ship as
   reasoned defaults. Tuning them needs a labelled Hi-Res fixture set (genuine vs upsampled) — a data
   problem, not an algorithm one.
-- **Pure-Rust DSD decoder for the `check` path.** Native `.dsf`/`.dff` parsing already exists for
-  the `check-dsd` authenticity analyzer (`src/dsd/`, no ffmpeg). The remaining piece is DSD→PCM
-  *decimation* so the PCM `check` path (`src/decode.rs`, still ffmpeg) can drop the dependency too:
-  reuse the container readers in `src/dsd/`, add a decimating low-pass to ~88.2 kHz PCM.
 - **DSD `check-dsd` follow-ups.** DST-compressed DSD decompression (currently `Unsupported`);
-  per-sample-rate threshold calibration (DSD64/128/256); a confidence score beyond the binary
-  Pass/Suspicious. Thresholds and method live in [`docs/calibration.md`](docs/calibration.md).
+  per-sample-rate threshold calibration (DSD64/128/256); more labelled CD→DSD samples to calibrate
+  the `cd_wall` step detector; a confidence score beyond the binary Pass/Suspicious. Thresholds and
+  method live in [`docs/calibration.md`](docs/calibration.md). (DSD is now analyzed entirely
+  natively from the 1-bit stream — the old ffmpeg decode path has been removed.)
+- **Optional DSD→PCM decimation.** If a future feature needs DSD as PCM (e.g. to run the PCM
+  detectors on it), reuse the `src/dsd/` container readers plus a decimating low-pass to ~88.2 kHz —
+  still no external dependency.
 
 ## Known-unsolvable (be honest)
 
