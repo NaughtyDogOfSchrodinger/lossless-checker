@@ -10,6 +10,7 @@
 //! The bitstream is never expanded to memory in full (DSD64 mono is ~11 MB/s as f32). Every channel
 //! is fed frame-by-frame into a streaming Welch accumulator and discarded.
 
+mod dff;
 mod dsf;
 pub mod judge;
 mod metrics;

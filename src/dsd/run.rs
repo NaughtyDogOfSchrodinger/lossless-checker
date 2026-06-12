@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 use serde::Serialize;
 
+use crate::dsd::dff::DffReader;
 use crate::dsd::dsf::DsfReader;
 use crate::dsd::judge::{judge, DsdThresholds, DsdVerdict, VerdictStatus};
 use crate::dsd::metrics::{detect_baseband_cutoff, hf_energy_ratio, noise_shaping_slope, PowerSpectrum};
@@ -131,14 +132,27 @@ fn scan_root(paths: &[PathBuf]) -> PathBuf {
 // --- per-file analysis ---
 
 fn analyze_one(path: &Path, fft_size: usize, th: &DsdThresholds) -> Result<DsdVerdict, DsdError> {
-    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
-        Some("dsf") => {
-            let mut reader = DsfReader::open(path)?;
-            analyze_stream(&mut reader, path, fft_size, th)
+    let container = match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("dsf") => DsdContainer::Dsf,
+        Some("dff") => DsdContainer::Dff,
+        _ => return Err(DsdError::Unsupported("not a DSD extension".into())),
+    };
+
+    let result = match container {
+        DsdContainer::Dsf => {
+            DsfReader::open(path).and_then(|mut r| analyze_stream(&mut r, path, fft_size, th))
         }
-        // DFF (uncompressed) parsing lands in the second batch; flag it clearly for now.
-        Some("dff") => Ok(unsupported(path, DsdContainer::Dff)),
-        _ => Err(DsdError::Unsupported("not a DSD extension".into())),
+        DsdContainer::Dff => {
+            DffReader::open(path).and_then(|mut r| analyze_stream(&mut r, path, fft_size, th))
+        }
+    };
+
+    // "Structurally valid but unhandled" (non-1-bit DSF, DST-compressed DFF, missing chunks) is a
+    // normal Unsupported *verdict*, not a parse failure — only truncation/bad-magic/I/O are errors.
+    match result {
+        Ok(v) => Ok(v),
+        Err(DsdError::Unsupported(_)) => Ok(unsupported(path, container)),
+        Err(e) => Err(e),
     }
 }
 

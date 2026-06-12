@@ -292,8 +292,8 @@ mid-band cutoff count as corroborating evidence of a PCM/lossy source.
   ✖  Parse error   0
 ```
 
-> **Status:** this is the v1.0 MVP. It parses **DSF**; **DFF** (and DST-compressed DSD) report
-> `Unsupported` for now and land in a later batch. The thresholds (`--min-slope 6.0`,
+> **Status:** v1.0. It parses **DSF** and **DFF** (uncompressed); **DST-compressed** DSD reports
+> `Unsupported`. The thresholds (`--min-slope 6.0`,
 > `--min-hf-ratio 0.05`) are *starting* defaults — calibrate them against labelled real/fake/DXD
 > samples before trusting borderline verdicts. Run `check-dsd --help` for all knobs (`--fft-size`,
 > `--slope-lo/-hi`, `--hf-threshold`, `--format json`, `-v`).

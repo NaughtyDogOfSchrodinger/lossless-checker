@@ -269,8 +269,8 @@ cargo run --release -- check-dsd ~/DSD --album-summary
   ✖  解析失败    0
 ```
 
-> **状态：** 这是 v1.0 MVP。目前解析 **DSF**；**DFF**（以及 DST 压缩的 DSD）暂报 `Unsupported`，
-> 后续批次补上。阈值（`--min-slope 6.0`、`--min-hf-ratio 0.05`）是*起步*经验值——边界判定请先用
+> **状态：** v1.0。解析 **DSF** 与 **DFF**（未压缩）；**DST 压缩**的 DSD 报 `Unsupported`。
+> 阈值（`--min-slope 6.0`、`--min-hf-ratio 0.05`）是*起步*经验值——边界判定请先用
 > 真/假/DXD 样本标定后再采信。运行 `check-dsd --help` 查看全部参数（`--fft-size`、`--slope-lo/-hi`、
 > `--hf-threshold`、`--format json`、`-v`）。
 
