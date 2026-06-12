@@ -12,7 +12,12 @@ pub struct DsdThresholds {
     pub min_hf_ratio: f64,
     pub cd_cutoff_hz: f64,
     pub cd_cutoff_tol_hz: f64,
+    /// Strict ceiling: a baseband cutoff below this is treated as a lossy cliff *when the noise
+    /// shaping is flat* (the "washed PCM" case, where the cutoff corroborates a fake).
     pub lossy_cutoff_max_hz: f64,
+    /// Hard low cliff: a cutoff below this convicts *even when the slope confirms genuine DSD*.
+    /// Above it (up to the CD wall) is treated as natural master roll-off and left alone.
+    pub hard_lossy_cutoff_hz: f64,
     pub slope_fit_lo_hz: f64,
     pub slope_fit_hi_hz: f64,
     pub hf_threshold_hz: f64,
@@ -28,6 +33,7 @@ impl Default for DsdThresholds {
             cd_cutoff_hz: 22_050.0,
             cd_cutoff_tol_hz: 1_000.0,
             lossy_cutoff_max_hz: 20_000.0,
+            hard_lossy_cutoff_hz: 16_500.0,
             slope_fit_lo_hz: 30_000.0,
             slope_fit_hi_hz: 100_000.0,
             hf_threshold_hz: 50_000.0,
@@ -99,6 +105,18 @@ pub struct DsdVerdict {
 
 /// Evaluate metrics against thresholds: collect flags and derive the status.
 /// Any flag => `Suspicious`; none => `Pass`. (`Unsupported` is decided upstream.)
+///
+/// The **noise-shaping slope is the primary authenticity signal** — it is the one fingerprint a
+/// transcoder cannot cheaply fake. The baseband cutoff is interpreted *relative to it*:
+///
+/// - **Slope confirms genuine SDM** (`slope >= min`): a baseband cutoff is mostly natural master
+///   roll-off (a 2020 vocal/acoustic or analog-sourced master commonly rolls off ~18–21 kHz), so
+///   it does **not** convict on its own. Only a sharp **CD wall** (~22.05 kHz — the one position
+///   that survives a CD→DSD re-modulation even though SDM re-adds noise shaping) or a **hard low
+///   cliff** (`< hard_lossy_cutoff_hz`, ~16.5 kHz) is still flagged.
+/// - **Slope is flat** (`slope < min`): the file already lacks the DSD fingerprint, so a baseband
+///   cutoff is *corroborating* evidence of a PCM/lossy source and is interpreted strictly (any
+///   cutoff below `lossy_cutoff_max_hz`, or near the CD wall, flags).
 pub fn judge(
     slope: f64,
     hf_ratio: f64,
@@ -107,15 +125,24 @@ pub fn judge(
 ) -> (Vec<DsdFlag>, VerdictStatus) {
     let mut flags = Vec::new();
 
-    if slope < th.min_noise_shaping_slope {
+    let slope_ok = slope >= th.min_noise_shaping_slope;
+    if !slope_ok {
         flags.push(DsdFlag::WeakNoiseShaping);
     }
     if hf_ratio < th.min_hf_ratio {
         flags.push(DsdFlag::LowHfEnergy);
     }
+
     if let Some(c) = cutoff {
-        if (c - th.cd_cutoff_hz).abs() < th.cd_cutoff_tol_hz {
+        let near_cd_wall = (c - th.cd_cutoff_hz).abs() < th.cd_cutoff_tol_hz;
+        if near_cd_wall {
             flags.push(DsdFlag::CdCutoff);
+        } else if slope_ok {
+            // Genuine DSD confirmed: only a hard low cliff still convicts; everything between
+            // ~16.5 kHz and the CD wall (and above it) is treated as natural roll-off.
+            if c < th.hard_lossy_cutoff_hz {
+                flags.push(DsdFlag::LossyCutoff);
+            }
         } else if c < th.lossy_cutoff_max_hz {
             flags.push(DsdFlag::LossyCutoff);
         } else {
@@ -150,5 +177,40 @@ mod tests {
         assert_eq!(status, VerdictStatus::Suspicious);
         assert!(flags.contains(&DsdFlag::WeakNoiseShaping));
         assert!(flags.contains(&DsdFlag::CdCutoff));
+    }
+
+    /// Genuine DSD (strong slope) with a natural ~19 kHz vocal-master roll-off must NOT be flagged.
+    /// This is the Emi Fujita DSD128 false-positive case that motivated the slope-gated logic.
+    #[test]
+    fn genuine_slope_with_natural_rolloff_passes() {
+        let th = DsdThresholds::default();
+        for cutoff in [17_916.0, 19_466.0, 19_638.0, 23_170.0] {
+            let (flags, status) = judge(18.0, 0.99, Some(cutoff), &th);
+            assert!(flags.is_empty(), "cutoff {cutoff} should not flag: {flags:?}");
+            assert_eq!(status, VerdictStatus::Pass);
+        }
+    }
+
+    /// Even with a genuine slope, a hard low cliff (<16.5 kHz) and a sharp CD wall still convict.
+    #[test]
+    fn genuine_slope_still_catches_hard_cliff_and_cd_wall() {
+        let th = DsdThresholds::default();
+        let (flags, status) = judge(18.0, 0.99, Some(15_000.0), &th);
+        assert_eq!(status, VerdictStatus::Suspicious);
+        assert!(flags.contains(&DsdFlag::LossyCutoff));
+
+        let (flags, status) = judge(18.0, 0.99, Some(22_050.0), &th);
+        assert_eq!(status, VerdictStatus::Suspicious);
+        assert!(flags.contains(&DsdFlag::CdCutoff));
+    }
+
+    /// With a flat slope the mid-band cutoff is corroborating evidence and is judged strictly.
+    #[test]
+    fn flat_slope_with_mid_cutoff_is_strict() {
+        let th = DsdThresholds::default();
+        let (flags, status) = judge(1.0, 0.99, Some(19_000.0), &th);
+        assert_eq!(status, VerdictStatus::Suspicious);
+        assert!(flags.contains(&DsdFlag::WeakNoiseShaping));
+        assert!(flags.contains(&DsdFlag::LossyCutoff));
     }
 }

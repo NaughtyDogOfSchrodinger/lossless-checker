@@ -234,18 +234,15 @@ mod tests {
     }
 
     fn write_temp(bytes: &[u8]) -> std::path::PathBuf {
+        // Process-wide counter so parallel tests never collide on a filename.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let id = SEQ.fetch_add(1, Ordering::Relaxed);
         let mut p = std::env::temp_dir();
-        p.push(format!("lc_dsf_test_{}.dsf", nanos()));
+        p.push(format!("lc_dsf_test_{}_{id}.dsf", std::process::id()));
         let mut f = File::create(&p).unwrap();
         f.write_all(bytes).unwrap();
         p
-    }
-
-    fn nanos() -> u128 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
     }
 
     #[test]

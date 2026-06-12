@@ -277,8 +277,12 @@ PCM/lossy source converted to DSD lacks that rise and often still carries a CD/l
 baseband. The bitstream is processed streaming, so memory stays decoupled from file size.
 
 Each file is judged **Pass** / **Suspicious** / **Unsupported** from three metrics: noise-shaping
-slope (dB/oct), ultrasonic energy ratio (>50 kHz), and any baseband cutoff (≤24 kHz only, so a DXD
-workflow's 176 kHz corner is never mistaken for a CD wall).
+slope (dB/oct), ultrasonic energy ratio (>50 kHz), and baseband cutoff (≤24 kHz only, so a DXD
+workflow's 176 kHz corner is never mistaken for a CD wall). The **slope is primary** and gates how
+the cutoff is read: when it confirms genuine SDM, a baseband cutoff is taken as natural master
+roll-off and only a sharp ~22.05 kHz CD wall or a hard low cliff (<16.5 kHz) still convicts — a 2020
+vocal/acoustic master rolling off at ~19 kHz is *not* flagged. Only when the slope is flat does a
+mid-band cutoff count as corroborating evidence of a PCM/lossy source.
 
 ```
 == Summary ==
