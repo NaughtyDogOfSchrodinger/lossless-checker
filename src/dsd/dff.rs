@@ -42,12 +42,8 @@ impl DffReader {
         let mut channels: Option<u16> = None;
         let mut data_size: Option<u64> = None;
 
-        // --- walk top-level chunks until the sound-data chunk ---
-        loop {
-            let id = match read_id_opt(&mut reader)? {
-                Some(id) => id,
-                None => break, // clean EOF without a DSD chunk
-            };
+        // --- walk top-level chunks until the sound-data chunk (or clean EOF) ---
+        while let Some(id) = read_id_opt(&mut reader)? {
             let size = read_u64(&mut reader)?;
             match &id {
                 b"PROP" => {
@@ -154,10 +150,8 @@ fn parse_prop<R: Read>(r: &mut R, size: u64) -> Result<(Option<u32>, Option<u16>
             b"CHNL" if data.len() >= 2 => {
                 channels = Some(u16::from_be_bytes(data[..2].try_into().unwrap()));
             }
-            b"CMPR" if data.len() >= 4 => {
-                if &data[..4] == b"DST " {
-                    return Err(DsdError::Unsupported("DST-compressed DSD".to_string()));
-                }
+            b"CMPR" if data.len() >= 4 && &data[..4] == b"DST " => {
+                return Err(DsdError::Unsupported("DST-compressed DSD".to_string()));
             }
             _ => {}
         }

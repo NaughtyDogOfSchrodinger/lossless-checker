@@ -274,6 +274,16 @@ cargo run --release -- check-dsd ~/DSD --album-summary
 > 真/假/DXD 样本标定后再采信。运行 `check-dsd --help` 查看全部参数（`--fft-size`、`--slope-lo/-hi`、
 > `--hf-threshold`、`--format json`、`-v`）。
 
+**导出频谱**用于画图（真假对比图，也是标定的依据）：
+
+```bash
+cargo run --release -- export-spectrum "track.dsf" -o track.csv   # 或 --channel 0
+```
+
+输出 `frequency_hz,power_db` 两列（默认写到 `<文件>.spectrum.csv`，所有声道混合）。喂给
+gnuplot/matplotlib/Excel 即可：真 DSD 有基带、然后 50 kHz 以上陡峭的噪声整形上扬；PCM/有损转制的
+假货超声区平坦（且基带常带 CD/有损截止）。
+
 ## 局限
 
 这是**启发式判断**，不是铁证。下面的「320k 盲区」是最直观的例子——左为真无损，右为 320k MP3

@@ -14,7 +14,7 @@ use crate::dsd::judge::{judge, DsdThresholds, DsdVerdict, VerdictStatus};
 use crate::dsd::metrics::{detect_baseband_cutoff, hf_energy_ratio, noise_shaping_slope, PowerSpectrum};
 use crate::dsd::unpack::unpack_block;
 use crate::dsd::welch::WelchPlan;
-use crate::dsd::{DsdContainer, DsdError, DsdStream};
+use crate::dsd::{DsdContainer, DsdError, DsdMeta, DsdStream};
 use crate::i18n::Lang;
 use crate::report::now_string;
 
@@ -131,21 +131,31 @@ fn scan_root(paths: &[PathBuf]) -> PathBuf {
 
 // --- per-file analysis ---
 
+fn container_of(path: &Path) -> Option<DsdContainer> {
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("dsf") => Some(DsdContainer::Dsf),
+        Some("dff") => Some(DsdContainer::Dff),
+        _ => None,
+    }
+}
+
+/// Open a `.dsf`/`.dff` file as a boxed `DsdStream`. Shared by the verdict path and export.
+pub(crate) fn open_reader(path: &Path) -> Result<Box<dyn DsdStream>, DsdError> {
+    match container_of(path) {
+        Some(DsdContainer::Dsf) => Ok(Box::new(DsfReader::open(path)?)),
+        Some(DsdContainer::Dff) => Ok(Box::new(DffReader::open(path)?)),
+        None => Err(DsdError::Unsupported("not a DSD extension".into())),
+    }
+}
+
 fn analyze_one(path: &Path, fft_size: usize, th: &DsdThresholds) -> Result<DsdVerdict, DsdError> {
-    let container = match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
-        Some("dsf") => DsdContainer::Dsf,
-        Some("dff") => DsdContainer::Dff,
-        _ => return Err(DsdError::Unsupported("not a DSD extension".into())),
+    let container = match container_of(path) {
+        Some(c) => c,
+        None => return Err(DsdError::Unsupported("not a DSD extension".into())),
     };
 
-    let result = match container {
-        DsdContainer::Dsf => {
-            DsfReader::open(path).and_then(|mut r| analyze_stream(&mut r, path, fft_size, th))
-        }
-        DsdContainer::Dff => {
-            DffReader::open(path).and_then(|mut r| analyze_stream(&mut r, path, fft_size, th))
-        }
-    };
+    let result = open_reader(path)
+        .and_then(|mut r| analyze_stream(r.as_mut(), path, fft_size, th));
 
     // "Structurally valid but unhandled" (non-1-bit DSF, DST-compressed DFF, missing chunks) is a
     // normal Unsupported *verdict*, not a parse failure — only truncation/bad-magic/I/O are errors.
@@ -156,12 +166,16 @@ fn analyze_one(path: &Path, fft_size: usize, th: &DsdThresholds) -> Result<DsdVe
     }
 }
 
-fn analyze_stream(
+/// Per-channel mean power spectrum + frame count, as returned by `accumulate`.
+pub(crate) type ChannelSpectra = Vec<(Vec<f64>, u64)>;
+
+/// Stream every block group through one Welch accumulator per channel, returning each channel's
+/// mean power spectrum + frame count along with the stream metadata. Shared by the verdict path
+/// and `export-spectrum`.
+pub(crate) fn accumulate(
     reader: &mut dyn DsdStream,
-    path: &Path,
     fft_size: usize,
-    th: &DsdThresholds,
-) -> Result<DsdVerdict, DsdError> {
+) -> Result<(DsdMeta, ChannelSpectra), DsdError> {
     let meta = reader.meta().clone();
     let channels = meta.channels.max(1) as usize;
 
@@ -179,28 +193,46 @@ fn analyze_stream(
         }
     }
 
-    // Average the per-channel mean power spectra (channels that produced no full frame are skipped).
+    let per_channel = accs.into_iter().map(|a| a.finalize()).collect();
+    Ok((meta, per_channel))
+}
+
+/// Average the per-channel mean power spectra (channels with no full frame are skipped). Returns
+/// `None` when nothing usable was decoded or the file is too short for a reliable fit.
+pub(crate) fn mix_power(per_channel: &[(Vec<f64>, u64)], fft_size: usize) -> Option<Vec<f64>> {
     let half = fft_size / 2;
     let mut sum = vec![0.0f64; half];
-    let mut active_channels = 0u64;
+    let mut active = 0u64;
     let mut frames = 0u64;
-    for acc in accs {
-        let (power, n) = acc.finalize();
-        if n > 0 {
-            for (s, v) in sum.iter_mut().zip(&power) {
+    for (power, n) in per_channel {
+        if *n > 0 {
+            for (s, v) in sum.iter_mut().zip(power) {
                 *s += v;
             }
-            active_channels += 1;
-            frames = frames.max(n);
+            active += 1;
+            frames = frames.max(*n);
         }
     }
-
-    if active_channels == 0 || frames < MIN_FFT_FRAMES {
-        return Ok(unsupported(path, meta.format));
+    if active == 0 || frames < MIN_FFT_FRAMES {
+        return None;
     }
     for s in sum.iter_mut() {
-        *s /= active_channels as f64;
+        *s /= active as f64;
     }
+    Some(sum)
+}
+
+fn analyze_stream(
+    reader: &mut dyn DsdStream,
+    path: &Path,
+    fft_size: usize,
+    th: &DsdThresholds,
+) -> Result<DsdVerdict, DsdError> {
+    let (meta, per_channel) = accumulate(reader, fft_size)?;
+    let sum = match mix_power(&per_channel, fft_size) {
+        Some(s) => s,
+        None => return Ok(unsupported(path, meta.format)),
+    };
 
     let ps = PowerSpectrum::new(sum, meta.sample_rate, fft_size);
     let slope = noise_shaping_slope(&ps, th.slope_fit_lo_hz, th.slope_fit_hi_hz);

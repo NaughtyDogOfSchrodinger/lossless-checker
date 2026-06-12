@@ -12,12 +12,14 @@
 
 mod dff;
 mod dsf;
+mod export;
 pub mod judge;
 mod metrics;
 mod run;
 mod unpack;
 mod welch;
 
+pub use export::{run_export_spectrum, ChannelSel, ExportArgs};
 pub use run::{run_check_dsd, DsdCheckArgs};
 
 use std::fmt;

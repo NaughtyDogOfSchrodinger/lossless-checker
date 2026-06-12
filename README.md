@@ -298,6 +298,17 @@ mid-band cutoff count as corroborating evidence of a PCM/lossy source.
 > samples before trusting borderline verdicts. Run `check-dsd --help` for all knobs (`--fft-size`,
 > `--slope-lo/-hi`, `--hf-threshold`, `--format json`, `-v`).
 
+**Export a spectrum** for plotting (the genuine-vs-fake comparison that drives calibration):
+
+```bash
+cargo run --release -- export-spectrum "track.dsf" -o track.csv   # or --channel 0
+```
+
+It writes `frequency_hz,power_db` rows (default `<file>.spectrum.csv`, all channels mixed). Feed it
+to gnuplot/matplotlib/Excel — a genuine DSD shows the baseband, then a steep noise-shaping rise past
+50 kHz; a PCM/lossy-sourced fake shows a flat ultrasonic region (and often a CD/lossy baseband
+cutoff).
+
 ## Limitations
 
 This is a **heuristic**, not proof. The 320k blind spot below is the clearest example — here is a

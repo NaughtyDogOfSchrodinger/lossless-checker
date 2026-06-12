@@ -34,7 +34,7 @@ use rayon::prelude::*;
 
 use decode::decode_audio;
 use dsd::judge::DsdThresholds;
-use dsd::{run_check_dsd, DsdCheckArgs};
+use dsd::{run_check_dsd, run_export_spectrum, ChannelSel, DsdCheckArgs, ExportArgs};
 use i18n::Lang;
 use report::{build_json, build_text_report, Outcome};
 use spectrum::SpectrumOpts;
@@ -54,6 +54,8 @@ enum Command {
     Check(CheckArgs),
     /// Detect fake DSD (PCM/lossy "washed" into DSD) via native noise-shaping analysis (no ffmpeg).
     CheckDsd(CheckDsdArgs),
+    /// Export one DSD file's power spectrum to CSV (frequency_hz,power_db) for plotting.
+    ExportSpectrum(ExportSpectrumArgs),
 }
 
 #[derive(Parser)]
@@ -146,6 +148,28 @@ struct CheckDsdArgs {
     lang: Lang,
 }
 
+#[derive(Parser)]
+struct ExportSpectrumArgs {
+    /// The .dsf/.dff file to analyze
+    file: PathBuf,
+
+    /// FFT size for the Welch power spectrum
+    #[arg(long, default_value_t = 65536)]
+    fft_size: usize,
+
+    /// CSV output path [default: <file>.spectrum.csv]
+    #[arg(long, short = 'o')]
+    output: Option<PathBuf>,
+
+    /// Channel to export: `mix` (all channels averaged, default) or a 0-based index
+    #[arg(long, default_value = "mix")]
+    channel: String,
+
+    /// Output language for log messages: zh (中文, default) or en
+    #[arg(long, value_enum, default_value = "zh")]
+    lang: Lang,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum OutputFormat {
     Text,
@@ -156,6 +180,7 @@ fn main() {
     match Cli::parse().command {
         Command::Check(args) => run_check(args),
         Command::CheckDsd(args) => run_dsd(args),
+        Command::ExportSpectrum(args) => run_export(args),
     }
 }
 
@@ -219,6 +244,35 @@ fn run_dsd(cli: CheckDsdArgs) {
         as_json: matches!(cli.format, OutputFormat::Json),
         album_summary: cli.album_summary,
         verbose: cli.verbose,
+        lang: cli.lang,
+    });
+    exit(code);
+}
+
+/// `export-spectrum` subcommand: dump a single file's power spectrum to CSV.
+fn run_export(cli: ExportSpectrumArgs) {
+    let channel = match cli.channel.trim().to_ascii_lowercase().as_str() {
+        "mix" => ChannelSel::Mix,
+        other => match other.parse::<usize>() {
+            Ok(i) => ChannelSel::Index(i),
+            Err(_) => {
+                eprintln!(
+                    "{}",
+                    cli.lang.pick(
+                        "--channel 只接受 `mix` 或一个 0 起始的声道序号",
+                        "--channel accepts only `mix` or a 0-based channel index"
+                    )
+                );
+                exit(2);
+            }
+        },
+    };
+
+    let code = run_export_spectrum(ExportArgs {
+        file: cli.file,
+        fft_size: cli.fft_size,
+        output: cli.output,
+        channel,
         lang: cli.lang,
     });
     exit(code);
