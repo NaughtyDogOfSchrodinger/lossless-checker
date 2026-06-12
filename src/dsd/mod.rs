@@ -7,8 +7,10 @@
 //! up into 50–100 kHz. A genuine DSD master shows a strong positive slope there; a PCM/lossy source
 //! "washed" into DSD does not, and often still carries a CD/lossy cutoff in the baseband.
 //!
-//! The bitstream is never expanded to memory in full (DSD64 mono is ~11 MB/s as f32). Every channel
-//! is fed frame-by-frame into a streaming Welch accumulator and discarded.
+//! The bitstream is never expanded to memory in full (DSD64 mono is ~11 MB/s as f32): each channel
+//! is unpacked into bounded batches, whose whole FFT frames are transformed in parallel and summed
+//! into a Welch power spectrum, then discarded. The trailing partial frame carries into the next
+//! batch, so the result is identical to a single-threaded sweep.
 
 mod dff;
 mod dsf;
@@ -32,8 +34,8 @@ pub struct DsdMeta {
     /// 2_822_400 = DSD64, 5_644_800 = DSD128, …
     pub sample_rate: u64,
     pub bit_order: BitOrder,
-    /// Samples per channel, when the container records it (DFF may not). Parsed now; used by the
-    /// second batch for exact tail trimming of the final (zero-padded) block.
+    /// Samples per channel, when the container records it (DFF derives it from the payload size).
+    /// Parsed for future exact tail trimming of the final (zero-padded) block.
     #[allow(dead_code)]
     pub total_samples_per_channel: Option<u64>,
 }

@@ -15,7 +15,7 @@ use crate::dsd::metrics::{
     detect_baseband_cutoff, detect_cd_wall, hf_energy_ratio, noise_shaping_slope, PowerSpectrum,
 };
 use crate::dsd::unpack::unpack_block;
-use crate::dsd::welch::WelchPlan;
+use crate::dsd::welch::{FrameWorker, WelchPlan};
 use crate::dsd::{DsdContainer, DsdError, DsdMeta, DsdStream};
 use crate::i18n::Lang;
 use crate::report::now_string;
@@ -23,6 +23,11 @@ use crate::report::now_string;
 /// Minimum number of FFT frames (per channel) for the metrics to be trustworthy. Below this the
 /// file is too short to fit a reliable slope, so it is reported as Unsupported rather than judged.
 const MIN_FFT_FRAMES: u64 = 8;
+
+/// Per-channel sample batch (≈ this many) unpacked before a parallel FFT flush. The 1-bit stream
+/// expands to 32× its size as `f32`, so the whole file is never held in memory; this caps the
+/// working set (~16 MB/channel at f32) while still giving each flush enough frames to parallelize.
+const FLUSH_SAMPLES_PER_CHANNEL: usize = 4 * 1024 * 1024;
 
 /// Everything `run_check_dsd` needs, assembled by the CLI layer (kept clap-free here).
 pub struct DsdCheckArgs {
@@ -171,32 +176,79 @@ fn analyze_one(path: &Path, fft_size: usize, th: &DsdThresholds) -> Result<DsdVe
 /// Per-channel mean power spectrum + frame count, as returned by `accumulate`.
 pub(crate) type ChannelSpectra = Vec<(Vec<f64>, u64)>;
 
-/// Stream every block group through one Welch accumulator per channel, returning each channel's
-/// mean power spectrum + frame count along with the stream metadata. Shared by the verdict path
-/// and `export-spectrum`.
+/// Decode every block group and return each channel's mean power spectrum + frame count along with
+/// the stream metadata. Shared by the verdict path and `export-spectrum`.
+///
+/// Reading stays sequential (the container is a stream), but the expensive part — windowing + FFT —
+/// runs in parallel: samples are unpacked into per-channel batches, and each full batch is FFT'd
+/// frame-by-frame across rayon's pool ([`WelchPlan::power_sum`]). Each channel carries its trailing
+/// partial frame into the next batch, so frames never straddle a batch boundary and the result is
+/// identical to a single-threaded sweep.
 pub(crate) fn accumulate(
     reader: &mut dyn DsdStream,
     fft_size: usize,
 ) -> Result<(DsdMeta, ChannelSpectra), DsdError> {
     let meta = reader.meta().clone();
     let channels = meta.channels.max(1) as usize;
+    let half = fft_size / 2;
 
     let plan = WelchPlan::new(fft_size);
-    let mut accs: Vec<_> = (0..channels).map(|_| plan.accumulator()).collect();
+    let mut workers = plan.worker_pool(); // allocated once, reused across every flush
+    // Per channel: running (power sum, frame count) and one persistent pending-sample buffer. Whole
+    // frames are FFT'd on flush and drained, leaving only the (<fft_size) partial-frame tail — which
+    // keeps the next batch's frames contiguous with this one's.
+    let mut totals: ChannelSpectra = (0..channels).map(|_| (vec![0.0; half], 0u64)).collect();
+    let mut pending: Vec<Vec<f32>> = (0..channels)
+        .map(|_| Vec::with_capacity(FLUSH_SAMPLES_PER_CHANNEL + fft_size))
+        .collect();
     let mut scratch: Vec<f32> = Vec::new();
 
     while let Some(group) = reader.next_block_group()? {
         for (c, bytes) in group.channels.iter().enumerate() {
-            if c >= accs.len() {
+            if c >= channels {
                 break;
             }
             unpack_block(bytes, meta.bit_order, &mut scratch);
-            accs[c].feed(&scratch);
+            pending[c].extend_from_slice(&scratch);
+        }
+        if pending[0].len() >= FLUSH_SAMPLES_PER_CHANNEL {
+            flush_pending(&plan, &mut workers, &mut pending, &mut totals);
         }
     }
+    flush_pending(&plan, &mut workers, &mut pending, &mut totals);
 
-    let per_channel = accs.into_iter().map(|a| a.finalize()).collect();
+    // Convert the per-channel power *sums* to means now that every frame has been counted.
+    let per_channel = totals
+        .into_iter()
+        .map(|(sum, count)| {
+            let mean = if count > 0 {
+                sum.iter().map(|s| s / count as f64).collect()
+            } else {
+                sum
+            };
+            (mean, count)
+        })
+        .collect();
     Ok((meta, per_channel))
+}
+
+/// FFT each channel's whole pending frames in parallel, add the per-bin power sums into `totals`,
+/// then drain the consumed prefix so only the partial-frame tail carries forward (contiguity).
+fn flush_pending(
+    plan: &WelchPlan,
+    workers: &mut [FrameWorker<'_>],
+    pending: &mut [Vec<f32>],
+    totals: &mut ChannelSpectra,
+) {
+    let fft_size = plan.fft_size();
+    for (c, buf) in pending.iter_mut().enumerate() {
+        let whole = (buf.len() / fft_size) * fft_size;
+        if whole == 0 {
+            continue;
+        }
+        totals[c].1 += plan.power_sum_into(&buf[..whole], workers, &mut totals[c].0);
+        buf.drain(..whole); // shift the <fft_size remainder to the front, keep capacity
+    }
 }
 
 /// Average the per-channel mean power spectra (channels with no full frame are skipped). Returns

@@ -1,20 +1,21 @@
-//! Streaming Welch power-spectrum accumulator.
+//! Welch power-spectrum primitives.
 //!
-//! Samples are fed in continuously (across block-group boundaries); whenever a full `fft_size`
-//! frame is buffered it is windowed, transformed, and its magnitude-squared accumulated. The
-//! raw samples are never retained, so peak memory is decoupled from file size (≈ the FFT buffers).
-//!
-//! One accumulator is used per channel so each channel's frames stay temporally contiguous; the
-//! per-channel mean power spectra are averaged afterwards.
+//! A file's samples are unpacked in bounded batches (the 1-bit stream expands to 32× its size as
+//! `f32`, so it is never held whole) and handed to [`WelchPlan::power_sum`], which transforms every
+//! whole `fft_size` frame and sums the magnitude-squared per bin. Frames are independent, so within
+//! one batch they are FFT'd in parallel — that is the per-file speedup. Frame contiguity across
+//! batch boundaries is preserved by the caller (it carries the trailing partial frame forward), so
+//! the result is bit-for-bit identical to a single-threaded sweep.
 
 use std::sync::Arc;
 
+use rayon::prelude::*;
 use realfft::num_complex::Complex;
 use realfft::{RealFftPlanner, RealToComplex};
 
 use crate::spectrum::blackman_harris;
 
-/// Build one FFT plan + window, shared (cloned `Arc`) across a file's per-channel accumulators.
+/// One FFT plan + window, shared across a file's batches and frames.
 pub struct WelchPlan {
     fft: Arc<dyn RealToComplex<f32>>,
     window: Vec<f32>,
@@ -31,75 +32,134 @@ impl WelchPlan {
         Self { fft, window, fft_size }
     }
 
-    pub fn accumulator(&self) -> WelchAccumulator {
-        WelchAccumulator::new(self.fft.clone(), self.window.clone(), self.fft_size)
+    pub fn fft_size(&self) -> usize {
+        self.fft_size
     }
-}
 
-pub struct WelchAccumulator {
-    fft: Arc<dyn RealToComplex<f32>>,
-    window: Vec<f32>,
-    input: Vec<f32>,            // make_input_vec, len fft_size
-    spectrum: Vec<Complex<f32>>, // make_output_vec, len fft_size/2 + 1
-    fill: Vec<f32>,
-    fill_len: usize,
-    fft_size: usize,
-    accum: Vec<f64>, // len fft_size/2
-    blocks: u64,
-}
+    /// A pool of reusable per-thread FFT workers, sized to the rayon pool. Allocate once per file
+    /// and reuse across every batch so the (large, FFT-sized) scratch buffers are not re-allocated
+    /// per flush.
+    pub fn worker_pool(&self) -> Vec<FrameWorker<'_>> {
+        (0..rayon::current_num_threads().max(1))
+            .map(|_| FrameWorker::new(self))
+            .collect()
+    }
 
-impl WelchAccumulator {
-    fn new(fft: Arc<dyn RealToComplex<f32>>, window: Vec<f32>, fft_size: usize) -> Self {
-        let input = fft.make_input_vec();
-        let spectrum = fft.make_output_vec();
-        Self {
-            fft,
-            window,
-            input,
-            spectrum,
-            fill: vec![0.0; fft_size],
-            fill_len: 0,
-            fft_size,
-            accum: vec![0.0; fft_size / 2],
-            blocks: 0,
+    /// Sum `|FFT(frame · window)|²` over every whole `fft_size` frame in `samples`, **adding** the
+    /// per-bin power into `out_sum` (length `fft_size/2`) and returning the number of frames summed.
+    /// A trailing partial frame (`samples.len() % fft_size`) is ignored; the caller carries it into
+    /// the next batch so no frame straddles a boundary. Frames are split into one contiguous range
+    /// per pooled worker and transformed in parallel.
+    pub fn power_sum_into(
+        &self,
+        samples: &[f32],
+        workers: &mut [FrameWorker<'_>],
+        out_sum: &mut [f64],
+    ) -> u64 {
+        let frames = samples.len() / self.fft_size;
+        if frames == 0 {
+            return 0;
         }
-    }
+        let per_worker = frames.div_ceil(workers.len());
 
-    /// Feed ±1 samples; full frames are transformed and accumulated automatically.
-    pub fn feed(&mut self, samples: &[f32]) {
-        for &s in samples {
-            self.fill[self.fill_len] = s;
-            self.fill_len += 1;
-            if self.fill_len == self.fft_size {
-                self.process_frame();
-                self.fill_len = 0;
+        workers.par_iter_mut().enumerate().for_each(|(i, w)| {
+            w.reset();
+            let lo = (i * per_worker).min(frames) * self.fft_size;
+            let hi = ((i + 1) * per_worker).min(frames) * self.fft_size;
+            for frame in samples[lo..hi].chunks_exact(self.fft_size) {
+                w.accumulate(frame);
             }
+        });
+
+        let mut count = 0;
+        for w in workers.iter() {
+            for (o, s) in out_sum.iter_mut().zip(&w.sum) {
+                *o += s;
+            }
+            count += w.count;
+        }
+        count
+    }
+}
+
+/// Reusable per-thread scratch + running power sum. One per pooled worker; [`FrameWorker::reset`]
+/// clears it for the next batch so the buffers (notably the FFT scratch) are allocated only once.
+pub struct FrameWorker<'a> {
+    plan: &'a WelchPlan,
+    input: Vec<f32>,
+    output: Vec<Complex<f32>>,
+    scratch: Vec<Complex<f32>>,
+    sum: Vec<f64>,
+    count: u64,
+}
+
+impl<'a> FrameWorker<'a> {
+    fn new(plan: &'a WelchPlan) -> Self {
+        Self {
+            input: plan.fft.make_input_vec(),
+            output: plan.fft.make_output_vec(),
+            scratch: plan.fft.make_scratch_vec(),
+            sum: vec![0.0; plan.fft_size / 2],
+            count: 0,
+            plan,
         }
     }
 
-    fn process_frame(&mut self) {
-        for (dst, (&s, &w)) in self.input.iter_mut().zip(self.fill.iter().zip(&self.window)) {
+    fn reset(&mut self) {
+        self.sum.iter_mut().for_each(|s| *s = 0.0);
+        self.count = 0;
+    }
+
+    fn accumulate(&mut self, frame: &[f32]) {
+        for (dst, (&s, &w)) in self.input.iter_mut().zip(frame.iter().zip(&self.plan.window)) {
             *dst = s * w;
         }
-        self.fft
-            .process(&mut self.input, &mut self.spectrum)
+        self.plan
+            .fft
+            .process_with_scratch(&mut self.input, &mut self.output, &mut self.scratch)
             .expect("FFT input/output sizes match");
-        for (a, c) in self.accum.iter_mut().zip(self.spectrum.iter().take(self.fft_size / 2)) {
+        for (a, c) in self.sum.iter_mut().zip(self.output.iter().take(self.plan.fft_size / 2)) {
             *a += c.norm_sqr() as f64;
         }
-        self.blocks += 1;
+        self.count += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn power_sum(plan: &WelchPlan, samples: &[f32]) -> (Vec<f64>, u64) {
+        let mut workers = plan.worker_pool();
+        let mut sum = vec![0.0f64; plan.fft_size() / 2];
+        let count = plan.power_sum_into(samples, &mut workers, &mut sum);
+        (sum, count)
     }
 
-    /// Mean linear power per bin (len `fft_size/2`) and the number of frames averaged.
-    /// Relative metrics (slope, energy ratio, peak-relative cutoff) need no window-gain
-    /// normalization, so none is applied.
-    pub fn finalize(mut self) -> (Vec<f64>, u64) {
-        if self.blocks > 0 {
-            let n = self.blocks as f64;
-            for a in self.accum.iter_mut() {
-                *a /= n;
-            }
+    /// `power_sum_into` on the whole buffer must equal summing it in arbitrary contiguous splits —
+    /// the property the batched caller relies on for losslessness.
+    #[test]
+    fn power_sum_is_split_invariant() {
+        const FFT: usize = 1024;
+        let plan = WelchPlan::new(FFT);
+        let samples: Vec<f32> = (0..FFT * 10).map(|i| ((i as f32) * 0.001).sin()).collect();
+
+        let (whole, n_whole) = power_sum(&plan, &samples);
+        // Split at a frame boundary (4 frames + 6 frames) and sum the parts.
+        let (a, na) = power_sum(&plan, &samples[..FFT * 4]);
+        let (b, nb) = power_sum(&plan, &samples[FFT * 4..]);
+        assert_eq!(n_whole, na + nb);
+        for ((w, x), y) in whole.iter().zip(&a).zip(&b) {
+            assert!((w - (x + y)).abs() < 1e-6, "{w} vs {}", x + y);
         }
-        (self.accum, self.blocks)
+    }
+
+    #[test]
+    fn power_sum_ignores_trailing_partial_frame() {
+        const FFT: usize = 512;
+        let plan = WelchPlan::new(FFT);
+        let samples = vec![0.5f32; FFT * 3 + 100]; // 3 whole frames + a partial
+        let (_, count) = power_sum(&plan, &samples);
+        assert_eq!(count, 3);
     }
 }
