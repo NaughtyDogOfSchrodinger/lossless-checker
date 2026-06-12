@@ -271,10 +271,18 @@ The full set of caveats:
 - **False positives:** classical, acoustic, vocal, ambient, and old recordings naturally have
   little high-frequency energy and may show up as ⚠️ or 🚩. Interludes, skits, and solo-piano
   tracks routinely do. Treat **album-wide** patterns as the real signal, not isolated tracks.
-- **False negatives — 320k is the blind spot.** Round-trip tests show 128k fakes are caught
-  reliably (~16.5 kHz), but 320k MP3 low-passes at ~20 kHz, which overlaps where plenty of genuine
-  lossless naturally rolls off. No cutoff-based metric can separate those, so a 320k transcode will
-  usually read ✅. This tool catches obvious fakes, not the high-bitrate ones.
+- **False negatives — high-bitrate and transparent codecs are the blind spot.** Round-trip tests
+  show 128k fakes are caught reliably (~16.5 kHz), but the cliff heuristic only works against codecs
+  that apply a low, hard lowpass. It cannot see:
+  - **320k MP3** — low-passes at ~20 kHz, overlapping where genuine lossless naturally rolls off.
+  - **High-bitrate AAC (256k+)** — soft lowpass at ~19–20 kHz, in that same overlap. AAC's
+    sub-cutoff notches are *reported* (detector #3) but never drive the verdict — too noisy on
+    natural musical nulls.
+  - **Opus** — at fullband bitrates it has no lowpass wall at all and is transparent by design, so
+    there is no cliff to find; it reads ✅ every time.
+
+  No cutoff-based metric can separate these from genuine lossless. This tool catches obvious
+  low-bitrate fakes, not transparent ones.
 - **Hi-Res thresholds are heuristic too.** The upsample check assumes genuine Hi-Res content
   reaches past ~28 kHz; a legitimate master that genuinely rolls off below that (rare — usually an
   old analog source) can read 🔼. The thresholds ship as reasoned defaults pending calibration
