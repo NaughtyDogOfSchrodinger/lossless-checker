@@ -72,8 +72,13 @@ approach here.
 - **Hi-Res threshold calibration.** `HIRES_MIN_EXT` / `HIRES_EMPTY_DB` in `src/verdict.rs` ship as
   reasoned defaults. Tuning them needs a labelled Hi-Res fixture set (genuine vs upsampled) — a data
   problem, not an algorithm one.
-- **Pure-Rust DSD decoder.** DSD currently shells out to ffmpeg (`src/decode.rs`). A native `.dsf`/
-  `.dff` → PCM decoder would drop the external dependency and let DSD be analyzed out of the box.
+- **Pure-Rust DSD decoder for the `check` path.** Native `.dsf`/`.dff` parsing already exists for
+  the `check-dsd` authenticity analyzer (`src/dsd/`, no ffmpeg). The remaining piece is DSD→PCM
+  *decimation* so the PCM `check` path (`src/decode.rs`, still ffmpeg) can drop the dependency too:
+  reuse the container readers in `src/dsd/`, add a decimating low-pass to ~88.2 kHz PCM.
+- **DSD `check-dsd` follow-ups.** DST-compressed DSD decompression (currently `Unsupported`);
+  per-sample-rate threshold calibration (DSD64/128/256); a confidence score beyond the binary
+  Pass/Suspicious. Thresholds and method live in [`docs/calibration.md`](docs/calibration.md).
 
 ## Known-unsolvable (be honest)
 
