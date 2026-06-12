@@ -284,6 +284,8 @@ cargo run --release -- export-spectrum "track.dsf" -o track.csv   # 或 --channe
 gnuplot/matplotlib/Excel 即可：真 DSD 有基带、然后 50 kHz 以上陡峭的噪声整形上扬；PCM/有损转制的
 假货超声区平坦（且基带常带 CD/有损截止）。
 
+阈值与标定方法（含首个已验证的真 DSD 参照样本）见 [`docs/calibration.md`](docs/calibration.md)。
+
 ## 局限
 
 这是**启发式判断**，不是铁证。下面的「320k 盲区」是最直观的例子——左为真无损，右为 320k MP3

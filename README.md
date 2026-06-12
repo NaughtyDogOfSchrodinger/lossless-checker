@@ -309,6 +309,9 @@ to gnuplot/matplotlib/Excel — a genuine DSD shows the baseband, then a steep n
 50 kHz; a PCM/lossy-sourced fake shows a flat ultrasonic region (and often a CD/lossy baseband
 cutoff).
 
+The thresholds and the calibration method (with a first verified real-DSD reference sample) are
+documented in [`docs/calibration.md`](docs/calibration.md).
+
 ## Limitations
 
 This is a **heuristic**, not proof. The 320k blind spot below is the clearest example — here is a
