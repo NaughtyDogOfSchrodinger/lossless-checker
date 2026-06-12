@@ -15,8 +15,9 @@ pub struct Outcome {
 }
 
 /// First path component below `root` — the "album" bucket for aggregation. Files directly
-/// under root are grouped under a placeholder.
-fn album_of(root: &Path, path: &Path, lang: Lang) -> String {
+/// under root are grouped under a placeholder. Shared with the DSD checker's per-album
+/// aggregation (`crate::dsd`).
+pub(crate) fn album_of(root: &Path, path: &Path, lang: Lang) -> String {
     let rel = path.strip_prefix(root).unwrap_or(path);
     let comps: Vec<_> = rel.components().collect();
     if comps.len() > 1 {
@@ -250,7 +251,7 @@ pub fn build_json(root: &Path, outcomes: &[Outcome]) -> ReportJson {
 }
 
 /// Local timestamp via the `date` command; empty string if it isn't available.
-fn now_string() -> String {
+pub(crate) fn now_string() -> String {
     std::process::Command::new("date")
         .arg("+%Y-%m-%d %H:%M:%S")
         .output()

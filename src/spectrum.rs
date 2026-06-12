@@ -137,8 +137,9 @@ fn avg_power_spectrum(samples: &[f32]) -> (Vec<f64>, u64) {
 
 /// 4-term Blackman-Harris window of length `n` (periodic form, divisor `n`).
 /// Sidelobes ~-92 dB vs Hann's ~-31 dB — keeps low-band leakage from masking the
-/// lossy-cutoff cliff in the high-frequency region.
-fn blackman_harris(n: usize) -> Vec<f32> {
+/// lossy-cutoff cliff in the high-frequency region. Reused by the DSD Welch accumulator
+/// (`crate::dsd::welch`) for the same low-leakage reason.
+pub(crate) fn blackman_harris(n: usize) -> Vec<f32> {
     use std::f32::consts::PI;
     const A0: f32 = 0.35875;
     const A1: f32 = 0.48829;

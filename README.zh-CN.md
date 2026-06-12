@@ -64,7 +64,7 @@ dB）让差距一目了然：真 Hi-Res 约在 −30 dB，上采样会跌到 −
 ```bash
 tar xzf lossless-checker-*.tar.gz
 cd lossless-checker-*/
-./lossless-checker "path/to/song.flac"
+./lossless-checker check "path/to/song.flac"
 ```
 
 在 macOS 上，从网络下载的二进制会被 Gatekeeper 隔离。若提示*"无法打开，因为无法验证开发者"*，
@@ -81,7 +81,7 @@ xattr -d com.apple.quarantine ./lossless-checker
 解压后在 PowerShell 或 `cmd` 里运行 `lossless-checker.exe`：
 
 ```powershell
-.\lossless-checker.exe "path\to\song.flac"
+.\lossless-checker.exe check "path\to\song.flac"
 ```
 
 若 SmartScreen 提示应用无法识别，点**更多信息 → 仍要运行**。
@@ -118,10 +118,16 @@ DSD **只按可听频段判定**：它的超声区是噪声整形噪声（不是
 
 ## 使用
 
+工具分两个子命令：
+
+- **`check`** —— PCM 假无损检测（FLAC/ALAC/WAV/…；DSD 经 ffmpeg 转 PCM）。本节全部内容。
+- **`check-dsd`** —— 原生 **DSD 真伪检测**（自解析 `.dsf`，不依赖 ffmpeg）。见下文
+  [DSD 真伪检测](#dsd-真伪检测-check-dsd)。
+
 **单文件** —— 输出详细判断：
 
 ```bash
-cargo run --release -- "path/to/song.flac"
+cargo run --release -- check "path/to/song.flac"
 ```
 
 > 输出默认中文；加 `--lang en` 切换为英文。机器可读的 JSON 报告不受语言影响。
@@ -156,7 +162,7 @@ cargo run --release -- "path/to/song.flac"
 **整库批量** —— 传一个目录即可递归、并行扫描，输出排好序的报告：
 
 ```bash
-cargo run --release -- ~/Music --report scan.txt --json scan.json
+cargo run --release -- check ~/Music --report scan.txt --json scan.json
 ```
 
 文本报告含：汇总、**按专辑排行**（🚩/🔼 数量降序——整张专辑同档位低截止＝来源八成有损，这是最强
@@ -235,6 +241,36 @@ cargo run --release -- ~/Music --report scan.txt --json scan.json
   **21–22 kHz**。
 - **判定区间：** 真无损集中在 19–22 kHz；128k 回转刚好压在 16.8 kHz 以下，故以此为 🚩 线。
 
+## DSD 真伪检测（`check-dsd`）
+
+`check` 对 DSD 只看*可听频段*（经 ffmpeg 转 PCM），只能揪出"DSD 来自低码率有损母带"。镜像问题
+——**CD/PCM 洗成 DSD** ——需要另一种信号，故独立成子命令：
+
+```bash
+cargo run --release -- check-dsd ~/DSD --album-summary
+```
+
+`check-dsd` **不依赖 ffmpeg**。它自己解析 `.dsf` 容器，取出原始 1-bit 流，直接计算其全频段功率谱
+（到 DSD 奈奎斯特，DSD64 约 1.41 MHz）。这暴露了转制者难以低成本伪造的物理指纹：**噪声整形**
+——真 DSD 母带把 Sigma-Delta 量化噪声推向 50–100 kHz，频谱在那里显著上扬（正斜率）。由 PCM/有损
+转制的假 DSD 缺这段上扬，且基带常残留 CD/有损截止。整条比特流流式处理，内存与文件大小解耦。
+
+每个文件按三项指标判 **Pass** / **Suspicious** / **Unsupported**：噪声整形斜率（dB/oct）、超高频
+能量占比（>50 kHz）、基带截止（只看 ≤24 kHz，故 DXD 工作流的 176 kHz 拐点不会被误判为 CD 墙）。
+
+```
+== 汇总 ==
+  ✅ 通过        124
+  🚩 可疑        8
+  ⛔ 暂不支持    3
+  ✖  解析失败    0
+```
+
+> **状态：** 这是 v1.0 MVP。目前解析 **DSF**；**DFF**（以及 DST 压缩的 DSD）暂报 `Unsupported`，
+> 后续批次补上。阈值（`--min-slope 6.0`、`--min-hf-ratio 0.05`）是*起步*经验值——边界判定请先用
+> 真/假/DXD 样本标定后再采信。运行 `check-dsd --help` 查看全部参数（`--fft-size`、`--slope-lo/-hi`、
+> `--hf-threshold`、`--format json`、`-v`）。
+
 ## 局限
 
 这是**启发式判断**，不是铁证。下面的「320k 盲区」是最直观的例子——左为真无损，右为 320k MP3
@@ -263,7 +299,8 @@ cargo run --release -- ~/Music --report scan.txt --json scan.json
 - **Hi-Res 阈值同样是启发式。** 上采样检测假设真 Hi-Res 内容会延伸过 ~28 kHz；个别真品母带若本身
   就滚降到该频率以下（少见，多为老的模拟源）可能被读成 🔼。这些阈值目前是经过推理的默认值，待用
   带标注的 Hi-Res 样本集进一步校准。
-- **DSD 需要 ffmpeg**（见[上文](#可选dsd-支持)）；没有它时 DSD 文件会被报错跳过而不参与分析。
+- **`check` 下的 DSD 需要 ffmpeg**（见[上文](#可选dsd-支持)）；没有它时 DSD 文件会被报错跳过而不
+  参与分析。原生 [`check-dsd`](#dsd-真伪检测-check-dsd) 子命令则无需 ffmpeg。
 - **性能：** 它会完整解码每一首，所以大库要跑几分钟（已用满所有 CPU 核）；单文件检查近乎瞬时。
 
 它的价值在于**从大库里批量揪出高度可疑的文件**。对被标记的文件，建议用 [Spek](https://www.spek.cc/)

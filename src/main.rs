@@ -12,9 +12,13 @@
 // This is a heuristic (classical/vocal/old recordings naturally have little HF and may false-
 // positive); its value is batch-flagging the highly suspicious. It is strictly read-only.
 //
-// DSD (.dsf/.dff) is decoded via an ffmpeg subprocess; all other formats via symphonia.
+// Two subcommands:
+//   `check`     — the PCM fake-lossless detector above (FLAC/ALAC/WAV/…; DSD via ffmpeg → PCM).
+//   `check-dsd` — native DSD authenticity check: parses .dsf itself, measures the noise-shaping
+//                 spectrum of the raw 1-bit stream (no ffmpeg). See `mod dsd`.
 
 mod decode;
+mod dsd;
 mod i18n;
 mod report;
 mod spectrum;
@@ -25,10 +29,12 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use clap::Parser;
+use clap::{Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
 
 use decode::decode_audio;
+use dsd::judge::DsdThresholds;
+use dsd::{run_check_dsd, DsdCheckArgs};
 use i18n::Lang;
 use report::{build_json, build_text_report, Outcome};
 use spectrum::SpectrumOpts;
@@ -36,8 +42,22 @@ use verdict::{classify, Analysis};
 
 #[derive(Parser)]
 #[command(name = "lossless-checker")]
-#[command(about = "Detect fake-lossless audio (lossy transcodes / upsampled hi-res); can scan a whole folder", long_about = None)]
+#[command(about = "Detect fake-lossless audio (PCM transcodes/upsampled hi-res) and fake DSD", long_about = None)]
 struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Detect fake-lossless PCM (lossy transcodes / upsampled hi-res). Scans a file or folder.
+    Check(CheckArgs),
+    /// Detect fake DSD (PCM/lossy "washed" into DSD) via native noise-shaping analysis (no ffmpeg).
+    CheckDsd(CheckDsdArgs),
+}
+
+#[derive(Parser)]
+struct CheckArgs {
     /// Path to a single audio file, or a directory to scan recursively
     path: PathBuf,
 
@@ -76,9 +96,71 @@ struct Cli {
     lang: Lang,
 }
 
-fn main() {
-    let cli = Cli::parse();
+#[derive(Parser)]
+struct CheckDsdArgs {
+    /// One or more .dsf/.dff files or directories (directories are scanned recursively)
+    paths: Vec<PathBuf>,
 
+    /// FFT size for the Welch power spectrum (DSD64 @65536 ≈ 43 Hz/bin)
+    #[arg(long, default_value_t = 65536)]
+    fft_size: usize,
+
+    /// Noise-shaping slope fit: lower bound in Hz
+    #[arg(long, default_value_t = 30_000.0)]
+    slope_lo: f64,
+
+    /// Noise-shaping slope fit: upper bound in Hz
+    #[arg(long, default_value_t = 100_000.0)]
+    slope_hi: f64,
+
+    /// Minimum noise-shaping slope (dB/oct) below which a file is flagged
+    #[arg(long, default_value_t = 6.0)]
+    min_slope: f64,
+
+    /// Ultrasonic energy is summed above this frequency (Hz)
+    #[arg(long, default_value_t = 50_000.0)]
+    hf_threshold: f64,
+
+    /// Minimum ultrasonic energy ratio below which a file is flagged
+    #[arg(long, default_value_t = 0.05)]
+    min_hf_ratio: f64,
+
+    /// Number of parallel worker threads (default: number of CPU cores)
+    #[arg(long, short = 'j')]
+    jobs: Option<usize>,
+
+    /// Output format: text (default) or json
+    #[arg(long, value_enum, default_value = "text")]
+    format: OutputFormat,
+
+    /// Also print a per-album aggregation
+    #[arg(long)]
+    album_summary: bool,
+
+    /// Print metrics for every file, not just the suspicious ones
+    #[arg(long, short = 'v')]
+    verbose: bool,
+
+    /// Output language for logs and the text report: zh (中文, default) or en. JSON is unaffected.
+    #[arg(long, value_enum, default_value = "zh")]
+    lang: Lang,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
+}
+
+fn main() {
+    match Cli::parse().command {
+        Command::Check(args) => run_check(args),
+        Command::CheckDsd(args) => run_dsd(args),
+    }
+}
+
+/// `check` subcommand: the PCM fake-lossless detector.
+fn run_check(cli: CheckArgs) {
     if let Some(jobs) = cli.jobs {
         // Best-effort: ignore the error if a global pool was already built.
         let _ = rayon::ThreadPoolBuilder::new()
@@ -111,6 +193,35 @@ fn main() {
         );
         exit(1);
     }
+}
+
+/// `check-dsd` subcommand: native DSD authenticity check.
+fn run_dsd(cli: CheckDsdArgs) {
+    if let Some(jobs) = cli.jobs {
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(jobs)
+            .build_global();
+    }
+
+    let thresholds = DsdThresholds {
+        min_noise_shaping_slope: cli.min_slope,
+        min_hf_ratio: cli.min_hf_ratio,
+        slope_fit_lo_hz: cli.slope_lo,
+        slope_fit_hi_hz: cli.slope_hi,
+        hf_threshold_hz: cli.hf_threshold,
+        ..Default::default()
+    };
+
+    let code = run_check_dsd(DsdCheckArgs {
+        paths: cli.paths,
+        fft_size: cli.fft_size,
+        thresholds,
+        as_json: matches!(cli.format, OutputFormat::Json),
+        album_summary: cli.album_summary,
+        verbose: cli.verbose,
+        lang: cli.lang,
+    });
+    exit(code);
 }
 
 /// Build the detection options from CLI knobs.
@@ -217,7 +328,7 @@ fn run_single(path: &Path, threshold: f64, peak_db: Option<f64>, lang: Lang) {
 }
 
 /// Directory mode: scan in parallel, then write the text report (and optional JSON).
-fn run_batch(cli: &Cli) {
+fn run_batch(cli: &CheckArgs) {
     let exts: Vec<String> = cli
         .ext
         .split(',')

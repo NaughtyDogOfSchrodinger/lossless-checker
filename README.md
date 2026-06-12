@@ -73,7 +73,7 @@ Grab a prebuilt binary from the [latest release](https://github.com/NaughtyDogOf
 ```bash
 tar xzf lossless-checker-*.tar.gz
 cd lossless-checker-*/
-./lossless-checker "path/to/song.flac"
+./lossless-checker check "path/to/song.flac"
 ```
 
 On macOS, Gatekeeper quarantines binaries downloaded from the web. If you see *"cannot be opened because the developer cannot be verified"*, clear the quarantine flag once:
@@ -89,7 +89,7 @@ To run it from anywhere, move it onto your `PATH`, e.g. `sudo mv lossless-checke
 Unzip the archive and run `lossless-checker.exe` from PowerShell or `cmd`:
 
 ```powershell
-.\lossless-checker.exe "path\to\song.flac"
+.\lossless-checker.exe check "path\to\song.flac"
 ```
 
 If SmartScreen warns about an unrecognized app, choose **More info → Run anyway**.
@@ -127,13 +127,20 @@ low-bitrate lossy master is still caught via its audible cutoff (🚩 below 16.5
 
 ## Usage
 
+There are two subcommands:
+
+- **`check`** — the PCM fake-lossless detector (FLAC/ALAC/WAV/…; DSD via ffmpeg → PCM). Everything
+  in this section.
+- **`check-dsd`** — native **DSD authenticity** check (parses `.dsf` itself, no ffmpeg). See
+  [DSD authenticity](#dsd-authenticity-check-dsd) below.
+
 > Logs and reports default to **Chinese**. Pass `--lang en` for English (as shown in the examples
 > below). The machine-readable JSON report is the same regardless of language.
 
 **Single file** — detailed verdict:
 
 ```bash
-cargo run --release -- "path/to/song.flac" --lang en
+cargo run --release -- check "path/to/song.flac" --lang en
 ```
 
 ```
@@ -167,7 +174,7 @@ Verdict: 🔼 Declared as Hi-Res, but real content stops at the ~CD band — lik
 **Whole library** — pass a directory to scan it recursively, in parallel, and emit a ranked report:
 
 ```bash
-cargo run --release -- ~/Music --report scan.txt --json scan.json
+cargo run --release -- check ~/Music --report scan.txt --json scan.json
 ```
 
 The text report has a summary, an **album ranking** (by 🚩/🔼 count — a whole album cut at the same
@@ -252,6 +259,41 @@ original bitrate:
 - **Verdict cutoffs:** genuine library files cluster at 19–22 kHz; 128k round-trips sit just under
   16.8 kHz, so that's the 🚩 line.
 
+## DSD authenticity (`check-dsd`)
+
+`check` judges DSD on its *audible band* (via ffmpeg → PCM), which only catches DSD sourced from a
+low-bitrate lossy master. The mirror problem — **CD/PCM "washed" into DSD** — needs a different
+signal, so it has its own subcommand:
+
+```bash
+cargo run --release -- check-dsd ~/DSD --album-summary --lang en
+```
+
+`check-dsd` **does not use ffmpeg**. It parses the `.dsf` container itself, pulls the raw 1-bit
+stream, and measures its full-band power spectrum up to the DSD Nyquist (~1.41 MHz for DSD64). That
+exposes the one fingerprint a transcoder can't cheaply fake: **noise shaping** — the Sigma-Delta
+quantization noise a genuine DSD master pushes up into 50–100 kHz (a strong positive slope). A
+PCM/lossy source converted to DSD lacks that rise and often still carries a CD/lossy cutoff in the
+baseband. The bitstream is processed streaming, so memory stays decoupled from file size.
+
+Each file is judged **Pass** / **Suspicious** / **Unsupported** from three metrics: noise-shaping
+slope (dB/oct), ultrasonic energy ratio (>50 kHz), and any baseband cutoff (≤24 kHz only, so a DXD
+workflow's 176 kHz corner is never mistaken for a CD wall).
+
+```
+== Summary ==
+  ✅ Pass          124
+  🚩 Suspicious    8
+  ⛔ Unsupported   3
+  ✖  Parse error   0
+```
+
+> **Status:** this is the v1.0 MVP. It parses **DSF**; **DFF** (and DST-compressed DSD) report
+> `Unsupported` for now and land in a later batch. The thresholds (`--min-slope 6.0`,
+> `--min-hf-ratio 0.05`) are *starting* defaults — calibrate them against labelled real/fake/DXD
+> samples before trusting borderline verdicts. Run `check-dsd --help` for all knobs (`--fft-size`,
+> `--slope-lo/-hi`, `--hf-threshold`, `--format json`, `-v`).
+
 ## Limitations
 
 This is a **heuristic**, not proof. The 320k blind spot below is the clearest example — here is a
@@ -287,8 +329,9 @@ The full set of caveats:
   reaches past ~28 kHz; a legitimate master that genuinely rolls off below that (rare — usually an
   old analog source) can read 🔼. The thresholds ship as reasoned defaults pending calibration
   against a labelled Hi-Res fixture set.
-- **DSD needs ffmpeg** (see [above](#optional-dsd-support)); without it, DSD files are skipped with
-  an error rather than analyzed.
+- **DSD under `check` needs ffmpeg** (see [above](#optional-dsd-support)); without it, DSD files are
+  skipped with an error rather than analyzed. The native [`check-dsd`](#dsd-authenticity-check-dsd)
+  subcommand needs no ffmpeg.
 - **Performance:** it decodes every track in full, so a large library takes a few minutes (it runs
   on all CPU cores). Single-file checks are near-instant.
 
