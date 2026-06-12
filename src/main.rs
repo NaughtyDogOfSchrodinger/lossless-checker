@@ -108,11 +108,11 @@ struct CheckDsdArgs {
     #[arg(long, default_value_t = 65536)]
     fft_size: usize,
 
-    /// Noise-shaping slope fit: lower bound in Hz
+    /// Noise-shaping slope fit: lower bound in Hz at DSD64 (scaled up with the DSD rate)
     #[arg(long, default_value_t = 30_000.0)]
     slope_lo: f64,
 
-    /// Noise-shaping slope fit: upper bound in Hz
+    /// Noise-shaping slope fit: upper bound in Hz at DSD64 (scaled up with the DSD rate)
     #[arg(long, default_value_t = 100_000.0)]
     slope_hi: f64,
 
@@ -120,7 +120,7 @@ struct CheckDsdArgs {
     #[arg(long, default_value_t = 6.0)]
     min_slope: f64,
 
-    /// Ultrasonic energy is summed above this frequency (Hz)
+    /// Ultrasonic energy is summed above this frequency (Hz) at DSD64 (scaled up with the DSD rate)
     #[arg(long, default_value_t = 50_000.0)]
     hf_threshold: f64,
 

@@ -24,6 +24,10 @@ use crate::report::now_string;
 /// file is too short to fit a reliable slope, so it is reported as Unsupported rather than judged.
 const MIN_FFT_FRAMES: u64 = 8;
 
+/// DSD64 bit rate (2.8224 MHz). Reference for scaling the noise-shaping band with the DSD rate:
+/// the shaped-noise region rises proportionally (DSD128 ≈ 2×, DSD256 ≈ 4×, DSD512 ≈ 8×).
+const DSD64_RATE_HZ: f64 = 2_822_400.0;
+
 /// Per-channel sample batch (≈ this many) unpacked before a parallel FFT flush. The 1-bit stream
 /// expands to 32× its size as `f32`, so the whole file is never held in memory; this caps the
 /// working set (~16 MB/channel at f32) while still giving each flush enough frames to parallelize.
@@ -288,6 +292,19 @@ pub(crate) fn mix_power(per_channel: &[(Vec<f64>, u64)], fft_size: usize) -> Opt
     Some(sum)
 }
 
+/// Scale factor for the noise-shaping band (slope fit + HF threshold), relative to DSD64.
+///
+/// The shaped quantization noise rises proportionally higher as the DSD rate climbs: DSD64 peaks
+/// around 70–100 kHz, DSD256 around 300–400 kHz (cross-validated against ffmpeg PCM decodes). The
+/// band thresholds are calibrated at DSD64, so a DSD256 fit on the *fixed* 30–100 kHz window lands
+/// in the quiet in-band valley *below* the shaping and reads flat/negative — false-flagging genuine
+/// high-rate DSD as PCM-sourced. Scaling tracks the shaping. Clamped to ≥1 so a sub-DSD64 oddity
+/// never shrinks the band. The audible-band CD-wall / baseband-cutoff detectors are physical
+/// (22.05 kHz, ≤24 kHz) and deliberately do not scale.
+fn noise_band_scale(sample_rate: u64) -> f64 {
+    (sample_rate as f64 / DSD64_RATE_HZ).max(1.0)
+}
+
 fn analyze_stream(
     reader: &mut dyn DsdStream,
     path: &Path,
@@ -302,8 +319,10 @@ fn analyze_stream(
     };
 
     let ps = PowerSpectrum::new(sum, meta.sample_rate, fft_size);
-    let slope = noise_shaping_slope(&ps, th.slope_fit_lo_hz, th.slope_fit_hi_hz);
-    let hf_ratio = hf_energy_ratio(&ps, th.hf_threshold_hz);
+
+    let k = noise_band_scale(meta.sample_rate);
+    let slope = noise_shaping_slope(&ps, th.slope_fit_lo_hz * k, th.slope_fit_hi_hz * k);
+    let hf_ratio = hf_energy_ratio(&ps, th.hf_threshold_hz * k);
     let cutoff = detect_baseband_cutoff(&ps, th.baseband_max_hz);
     let cd_wall = detect_cd_wall(&ps, th.cd_cutoff_hz, th.cd_wall_step_db, th.cd_wall_floor_db);
     let (flags, status) = judge(slope, hf_ratio, cutoff, cd_wall, th);
@@ -648,6 +667,22 @@ mod tests {
         p.push(format!("lc_dsd_integ_{}_{id}.dsf", std::process::id()));
         std::fs::File::create(&p).unwrap().write_all(bytes).unwrap();
         p
+    }
+
+    /// The noise-shaping band tracks the DSD rate: unity at DSD64, doubling per rate step, and never
+    /// below 1 (a CD wall / baseband cutoff stays fixed regardless — those are tested via the band's
+    /// non-use, here we just pin the scale). DSD256 must lift the 30–100 kHz default to 120–400 kHz,
+    /// where the genuine high-rate noise-shaping rise actually sits.
+    #[test]
+    fn noise_band_scales_with_dsd_rate() {
+        assert_eq!(noise_band_scale(2_822_400), 1.0); // DSD64
+        assert_eq!(noise_band_scale(5_644_800), 2.0); // DSD128
+        assert_eq!(noise_band_scale(11_289_600), 4.0); // DSD256
+        assert_eq!(noise_band_scale(1_411_200), 1.0); // sub-DSD64 clamps to 1
+        let th = DsdThresholds::default();
+        let k = noise_band_scale(11_289_600);
+        assert_eq!(th.slope_fit_lo_hz * k, 120_000.0);
+        assert_eq!(th.slope_fit_hi_hz * k, 400_000.0);
     }
 
     /// Lower the slope gate so the 1st-order modulator's ~+6 dB/oct counts as genuine SDM.
