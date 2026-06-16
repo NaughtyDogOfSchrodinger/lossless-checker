@@ -337,6 +337,21 @@ The full set of caveats:
 
   No cutoff-based metric can separate these from genuine lossless. This tool catches obvious
   low-bitrate fakes, not transparent ones.
+- **It assumes non-adversarial input — a cutoff cliff can be deliberately forged.** Every detector
+  here is passive: it reads what the encoder happened to leave behind. Two adversarial cases defeat
+  it outright:
+  - **The low-pass is optional.** MP3/AAC do not *require* a hard high-frequency lowpass; some
+    encoders and settings skip it. With no cliff to find, the cutoff metric has nothing to read and
+    the file passes.
+  - **The cliff can be synthesized back in.** Harmonic exciters / "air effect" processing regenerate
+    high frequencies from the surviving lower harmonics, painting energy back above the original
+    lowpass. A 128k file whose treble was gone can be made to *look* full-band again, reading ✅.
+  Both are real techniques used in the "scene" specifically to pass automated quality control. This
+  tool is built for the casual case — libraries of unknown provenance where fakes are lazy
+  transcodes, not files deliberately processed to beat a detector. Defeating active forgery needs
+  detectors that read what lossy compression *destroys* rather than what it leaves behind — transient
+  precision and codec frame structure (see [ROADMAP.md](./ROADMAP.md)) — which are far harder to fake
+  after the fact.
 - **Hi-Res thresholds are heuristic too.** The upsample check assumes genuine Hi-Res content
   reaches past ~28 kHz; a legitimate master that genuinely rolls off below that (rare — usually an
   old analog source) can read 🔼. The thresholds ship as reasoned defaults pending calibration
